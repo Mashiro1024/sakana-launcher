@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="Sakana.App.Pages.LibraryPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:Sakana.App.ViewModels">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="32,26,32,32" Spacing="22">
+            <Grid>
+                <StackPanel Spacing="4">
+                    <TextBlock Text="你的游戏空间" FontSize="32" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                    <TextBlock Text="每个实例都有独立的版本和配置。" FontSize="15" Foreground="{ThemeResource SakanaMutedBrush}" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <Button Content="在线浏览整合包" Click="BrowseModrinthPacks_Click" Padding="14,10" />
+                    <Button Content="导入整合包" Click="ImportModrinthPack_Click" Padding="14,10" />
+                    <Button Content="＋  新建实例" Click="CreateProfile_Click" Padding="16,10" Style="{ThemeResource AccentButtonStyle}" FontWeight="SemiBold" />
+                </StackPanel>
+            </Grid>
+
+            <InfoBar x:Name="PreviewInfoBar" IsOpen="True" Severity="Informational" Title="实例安装器" Message="可创建原版或 Fabric 实例，也可导入 Modrinth .mrpack 整合包；安装时会校验游戏文件并下载对应 Java 运行时。" />
+            <InfoBar x:Name="RepairInfoBar" IsOpen="False" Severity="Success" IsClosable="True" />
+            <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" Title="操作失败" />
+
+            <Border x:Name="EmptyState" Padding="28" CornerRadius="16" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12" MaxWidth="440">
+                    <Border Width="64" Height="64" CornerRadius="18" Background="{ThemeResource SakanaAccentSoftBrush}" HorizontalAlignment="Center">
+                        <SymbolIcon Symbol="Library" Foreground="{ThemeResource SakanaAccentBrush}" />
+                    </Border>
+                    <TextBlock Text="实例库还是空的" FontSize="24" FontWeight="SemiBold" HorizontalAlignment="Center" Foreground="{ThemeResource SakanaTextBrush}" />
+                    <TextBlock Text="创建一个实例，选择官方发布版本，然后安装游戏文件。" FontSize="14" TextWrapping="Wrap" TextAlignment="Center" Foreground="{ThemeResource SakanaMutedBrush}" />
+                    <Button Content="创建第一个实例" Click="CreateProfile_Click" HorizontalAlignment="Center" Padding="16,9" />
+                </StackPanel>
+            </Border>
+
+            <ItemsControl x:Name="ProfileItems" ItemsSource="{x:Bind ViewModel.Profiles, Mode=OneWay}" Visibility="Collapsed">
+                <ItemsControl.ItemContainerTransitions>
+                    <TransitionCollection>
+                        <AddDeleteThemeTransition />
+                    </TransitionCollection>
+                </ItemsControl.ItemContainerTransitions>
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="12" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:InstanceCardViewModel">
+                        <Border Padding="18" CornerRadius="14" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1">
+                            <StackPanel Spacing="12">
+                                <Grid ColumnSpacing="16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="54" Height="54" CornerRadius="14" Background="{ThemeResource SakanaAccentSoftBrush}">
+                                        <TextBlock Text="✦" FontSize="22" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{ThemeResource SakanaAccentBrush}" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
+                                        <TextBlock Text="{x:Bind Name, Mode=OneWay}" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                                        <TextBlock Text="{x:Bind VersionLabel}" FontSize="13" Foreground="{ThemeResource SakanaMutedBrush}" />
+                                        <TextBlock Text="{x:Bind StateText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource SakanaAccentBrush}" />
+                                        <TextBlock Text="{x:Bind LastError, Mode=OneWay}" Visibility="{x:Bind ErrorVisibility, Mode=OneWay}" FontSize="12" TextWrapping="Wrap" Foreground="#FFFF8C8C" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2" VerticalAlignment="Center" Orientation="Horizontal" Spacing="8">
+                                        <Button Content="启动" Tag="{x:Bind Id}" Click="LaunchProfile_Click" Visibility="{x:Bind LaunchActionVisibility, Mode=OneWay}" IsEnabled="{x:Bind LaunchActionEnabled, Mode=OneWay}" Style="{ThemeResource AccentButtonStyle}" />
+                                        <Button Content="停止" Tag="{x:Bind Id}" Click="StopProfile_Click" Visibility="{x:Bind StopActionVisibility, Mode=OneWay}" />
+                                        <Button Content="⋯" Tag="{x:Bind Id}" Click="MoreActions_Click" ToolTipService.ToolTip="更多操作" AutomationProperties.Name="更多实例操作" />
+                                    </StackPanel>
+                                </Grid>
+                                <TextBlock Text="{x:Bind MemoryLabel, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource SakanaMutedBrush}" />
+                                <ProgressBar Minimum="0" Maximum="100" Value="{x:Bind ProgressValue, Mode=OneWay}" Visibility="{x:Bind ProgressVisibility, Mode=OneWay}" />
+                                <TextBlock Text="{x:Bind ProgressStatus, Mode=OneWay}" Visibility="{x:Bind ProgressVisibility, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource SakanaMutedBrush}" />
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

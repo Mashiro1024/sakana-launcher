@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Sakana.App (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "Sakana.App (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

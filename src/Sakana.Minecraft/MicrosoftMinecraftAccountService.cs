@@ -1,0 +1,454 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Sakana.Application;
+using Sakana.Domain;
+
+namespace Sakana.Minecraft;
+
+/// <summary>
+/// Implements the Microsoft device-code, Xbox Live/XSTS, and Minecraft Services account exchange.
+/// The Minecraft Services application registration must be authorized for the configured client ID.
+/// </summary>
+public sealed class MicrosoftMinecraftAccountService(
+    HttpClient httpClient,
+    IMicrosoftCredentialStore credentialStore) : IMinecraftAccountService
+{
+    private static readonly Uri DeviceCodeEndpoint = new("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode");
+    private static readonly Uri TokenEndpoint = new("https://login.microsoftonline.com/consumers/oauth2/v2.0/token");
+    private static readonly Uri XboxUserEndpoint = new("https://user.auth.xboxlive.com/user/authenticate");
+    private static readonly Uri XboxXstsEndpoint = new("https://xsts.auth.xboxlive.com/xsts/authorize");
+    private static readonly Uri MinecraftLoginEndpoint = new("https://api.minecraftservices.com/authentication/login_with_xbox");
+    private static readonly Uri MinecraftEntitlementsEndpoint = new("https://api.minecraftservices.com/entitlements/mcstore");
+    private static readonly Uri MinecraftProfileEndpoint = new("https://api.minecraftservices.com/minecraft/profile");
+    private static readonly JsonSerializerOptions ApiJsonOptions = new()
+    {
+        PropertyNamingPolicy = null,
+        PropertyNameCaseInsensitive = true
+    };
+
+    private readonly SemaphoreSlim _sessionLock = new(1, 1);
+    private MinecraftAccountSession? _currentSession;
+    private DateTimeOffset _sessionExpiresAtUtc;
+    private string? _currentClientId;
+
+    public async Task<MicrosoftDeviceCodePrompt> BeginSignInAsync(
+        string clientId,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedClientId = ValidateClientId(clientId);
+        using var response = await httpClient.PostAsync(
+            DeviceCodeEndpoint,
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["client_id"] = normalizedClientId,
+                ["scope"] = "XboxLive.signin offline_access"
+            }),
+            cancellationToken);
+
+        var payload = await ReadJsonAsync<DeviceCodeResponse>(response, "Microsoft device-code sign-in", cancellationToken);
+        if (string.IsNullOrWhiteSpace(payload.DeviceCode) || string.IsNullOrWhiteSpace(payload.UserCode) ||
+            string.IsNullOrWhiteSpace(payload.VerificationUri))
+        {
+            throw new InvalidDataException("Microsoft returned an incomplete device-code challenge.");
+        }
+
+        var expiresInSeconds = Math.Clamp(payload.ExpiresIn, 60, 1800);
+        return new MicrosoftDeviceCodePrompt(
+            payload.DeviceCode,
+            payload.UserCode,
+            payload.VerificationUri,
+            payload.Message ?? "Open the verification page and enter the displayed code.",
+            DateTimeOffset.UtcNow.AddSeconds(expiresInSeconds),
+            Math.Clamp(payload.Interval, 1, 30));
+    }
+
+    public async Task<MinecraftAccountSession> CompleteSignInAsync(
+        string clientId,
+        MicrosoftDeviceCodePrompt prompt,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(prompt);
+        var normalizedClientId = ValidateClientId(clientId);
+        var oauth = await PollForOAuthTokenAsync(normalizedClientId, prompt, cancellationToken);
+        if (string.IsNullOrWhiteSpace(oauth.RefreshToken))
+        {
+            throw new InvalidDataException("Microsoft did not issue a refresh token for Sakana. Check the application's offline_access configuration.");
+        }
+
+        await SaveRefreshCredentialAsync(normalizedClientId, oauth.RefreshToken, cancellationToken);
+        var account = await CreateMinecraftSessionAsync(normalizedClientId, oauth.AccessToken, oauth.ExpiresIn, cancellationToken);
+        await _sessionLock.WaitAsync(cancellationToken);
+        try
+        {
+            _currentClientId = normalizedClientId;
+            _currentSession = account.Session;
+            _sessionExpiresAtUtc = DateTimeOffset.UtcNow.AddSeconds(account.ExpiresInSeconds);
+        }
+        finally
+        {
+            _sessionLock.Release();
+        }
+
+        return account.Session;
+    }
+
+    public async Task<MinecraftAccountSession?> GetCurrentSessionAsync(
+        string clientId,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedClientId = ValidateClientId(clientId);
+        await _sessionLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_currentSession is not null &&
+                string.Equals(_currentClientId, normalizedClientId, StringComparison.OrdinalIgnoreCase) &&
+                _sessionExpiresAtUtc > DateTimeOffset.UtcNow.AddMinutes(2))
+            {
+                return _currentSession;
+            }
+
+            var savedCredential = await ReadRefreshCredentialAsync(cancellationToken);
+            if (savedCredential is null)
+            {
+                _currentSession = null;
+                _currentClientId = null;
+                return null;
+            }
+
+            if (!string.Equals(savedCredential.ClientId, normalizedClientId, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("The configured Microsoft client ID changed. Sign in again with the current ID.");
+            }
+
+            OAuthTokenResponse oauth;
+            try
+            {
+                oauth = await RefreshOAuthTokenAsync(normalizedClientId, savedCredential.RefreshToken, cancellationToken);
+            }
+            catch (MicrosoftOAuthException exception) when (exception.Error == "invalid_grant")
+            {
+                await credentialStore.ClearAsync(cancellationToken);
+                _currentSession = null;
+                _currentClientId = null;
+                return null;
+            }
+
+            var rotatedRefreshToken = string.IsNullOrWhiteSpace(oauth.RefreshToken)
+                ? savedCredential.RefreshToken
+                : oauth.RefreshToken;
+            await SaveRefreshCredentialAsync(normalizedClientId, rotatedRefreshToken, cancellationToken);
+            var account = await CreateMinecraftSessionAsync(normalizedClientId, oauth.AccessToken, oauth.ExpiresIn, cancellationToken);
+            _currentClientId = normalizedClientId;
+            _currentSession = account.Session;
+            _sessionExpiresAtUtc = DateTimeOffset.UtcNow.AddSeconds(account.ExpiresInSeconds);
+            return _currentSession;
+        }
+        finally
+        {
+            _sessionLock.Release();
+        }
+    }
+
+    public async Task SignOutAsync(CancellationToken cancellationToken = default)
+    {
+        await _sessionLock.WaitAsync(cancellationToken);
+        try
+        {
+            _currentSession = null;
+            _currentClientId = null;
+            _sessionExpiresAtUtc = DateTimeOffset.MinValue;
+            await credentialStore.ClearAsync(cancellationToken);
+        }
+        finally
+        {
+            _sessionLock.Release();
+        }
+    }
+
+    private async Task<OAuthTokenResponse> PollForOAuthTokenAsync(
+        string clientId,
+        MicrosoftDeviceCodePrompt prompt,
+        CancellationToken cancellationToken)
+    {
+        var deadline = prompt.ExpiresAtUtc;
+        var interval = prompt.PollingIntervalSeconds;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(interval), cancellationToken);
+            using var response = await httpClient.PostAsync(
+                TokenEndpoint,
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["grant_type"] = "urn:ietf:params:oauth:grant-type:device_code",
+                    ["client_id"] = clientId,
+                    ["device_code"] = prompt.DeviceCode
+                }),
+                cancellationToken);
+
+            if (response.IsSuccessStatusCode)
+            {
+                return await ReadJsonAsync<OAuthTokenResponse>(response, "Microsoft token exchange", cancellationToken);
+            }
+
+            var oauthError = await ReadOAuthErrorAsync(response, cancellationToken);
+            switch (oauthError.Error)
+            {
+                case "authorization_pending":
+                    continue;
+                case "slow_down":
+                    interval = Math.Min(interval + 5, 60);
+                    continue;
+                case "authorization_declined":
+                    throw new InvalidOperationException("Microsoft account sign-in was declined.");
+                case "expired_token":
+                case "bad_verification_code":
+                    throw new InvalidOperationException("The Microsoft sign-in code expired. Start sign-in again.");
+                default:
+                    throw new MicrosoftOAuthException(oauthError.Error ?? "oauth_error", "Microsoft account sign-in could not be completed.");
+            }
+        }
+
+        throw new TimeoutException("The Microsoft sign-in code expired. Start sign-in again.");
+    }
+
+    private async Task<OAuthTokenResponse> RefreshOAuthTokenAsync(
+        string clientId,
+        string refreshToken,
+        CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsync(
+            TokenEndpoint,
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["client_id"] = clientId,
+                ["grant_type"] = "refresh_token",
+                ["refresh_token"] = refreshToken,
+                ["scope"] = "XboxLive.signin offline_access"
+            }),
+            cancellationToken);
+
+        if (response.IsSuccessStatusCode)
+        {
+            var token = await ReadJsonAsync<OAuthTokenResponse>(response, "Microsoft token refresh", cancellationToken);
+            if (string.IsNullOrWhiteSpace(token.AccessToken))
+            {
+                throw new InvalidDataException("Microsoft returned an empty access token during refresh.");
+            }
+
+            return token;
+        }
+
+        var error = await ReadOAuthErrorAsync(response, cancellationToken);
+        throw new MicrosoftOAuthException(error.Error ?? "oauth_error", "Microsoft account access needs to be renewed.");
+    }
+
+    private async Task<(MinecraftAccountSession Session, int ExpiresInSeconds)> CreateMinecraftSessionAsync(
+        string clientId,
+        string microsoftAccessToken,
+        int microsoftExpiresInSeconds,
+        CancellationToken cancellationToken)
+    {
+        var xboxUser = await PostJsonAsync<XboxTokenResponse>(XboxUserEndpoint, new
+        {
+            Properties = new
+            {
+                AuthMethod = "RPS",
+                SiteName = "user.auth.xboxlive.com",
+                RpsTicket = $"d={microsoftAccessToken}"
+            },
+            RelyingParty = "http://auth.xboxlive.com",
+            TokenType = "JWT"
+        }, "Xbox Live authentication", cancellationToken);
+
+        var xsts = await PostJsonAsync<XboxTokenResponse>(XboxXstsEndpoint, new
+        {
+            Properties = new
+            {
+                SandboxId = "RETAIL",
+                UserTokens = new[] { xboxUser.Token }
+            },
+            RelyingParty = "rp://api.minecraftservices.com/",
+            TokenType = "JWT"
+        }, "Xbox XSTS authorization", cancellationToken);
+
+        var claims = xsts.DisplayClaims?.Xui?.FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(claims?.UserHash))
+        {
+            throw new InvalidDataException("Xbox XSTS did not return a user identity claim.");
+        }
+
+        var minecraftToken = await PostJsonAsync<MinecraftTokenResponse>(MinecraftLoginEndpoint, new
+        {
+            identityToken = $"XBL3.0 x={claims.UserHash};{xsts.Token}",
+            ensureLegacyEnabled = true
+        }, "Minecraft Services account exchange", cancellationToken);
+
+        using var entitlementRequest = new HttpRequestMessage(HttpMethod.Get, MinecraftEntitlementsEndpoint);
+        entitlementRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", minecraftToken.AccessToken);
+        using var entitlementResponse = await httpClient.SendAsync(entitlementRequest, cancellationToken);
+        var entitlements = await ReadJsonAsync<MinecraftEntitlementsResponse>(entitlementResponse, "Minecraft ownership check", cancellationToken);
+        if (entitlements.Items is null || !entitlements.Items.Any(item =>
+                item.Name is "game_minecraft" or "product_minecraft"))
+        {
+            throw new InvalidOperationException("This Microsoft account does not have a Minecraft Java Edition entitlement.");
+        }
+
+        using var profileRequest = new HttpRequestMessage(HttpMethod.Get, MinecraftProfileEndpoint);
+        profileRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", minecraftToken.AccessToken);
+        using var profileResponse = await httpClient.SendAsync(profileRequest, cancellationToken);
+        var profile = await ReadJsonAsync<MinecraftProfileResponse>(profileResponse, "Minecraft profile lookup", cancellationToken);
+        if (string.IsNullOrWhiteSpace(profile.Id) || string.IsNullOrWhiteSpace(profile.Name))
+        {
+            throw new InvalidDataException("Minecraft Services returned an incomplete player profile.");
+        }
+
+        var session = new MinecraftAccountSession(
+            profile.Name,
+            profile.Id,
+            minecraftToken.AccessToken,
+            clientId,
+            "msa",
+            claims.XboxId,
+            userPropertiesJson: "{}");
+        return (session, Math.Min(minecraftToken.ExpiresIn, microsoftExpiresInSeconds));
+    }
+
+    private async Task<T> PostJsonAsync<T>(Uri endpoint, object body, string operation, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsync(endpoint, JsonContent.Create(body, options: ApiJsonOptions), cancellationToken);
+        return await ReadJsonAsync<T>(response, operation, cancellationToken);
+    }
+
+    private static async Task<T> ReadJsonAsync<T>(
+        HttpResponseMessage response,
+        string operation,
+        CancellationToken cancellationToken)
+    {
+        var content = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            var apiError = TryDeserialize<ApiErrorResponse>(content);
+            if (response.StatusCode == HttpStatusCode.Forbidden &&
+                operation.Contains("Minecraft Services", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new MinecraftClientIdNotAuthorizedException();
+            }
+
+            var detail = apiError?.ErrorMessage ?? apiError?.Message;
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
+                ? $"{operation} failed with HTTP {(int)response.StatusCode}."
+                : $"{operation} failed: {detail}");
+        }
+
+        return JsonSerializer.Deserialize<T>(content, ApiJsonOptions)
+            ?? throw new InvalidDataException($"{operation} returned an empty response.");
+    }
+
+    private static async Task<OAuthErrorResponse> ReadOAuthErrorAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        var content = await response.Content.ReadAsStringAsync(cancellationToken);
+        return TryDeserialize<OAuthErrorResponse>(content) ?? new OAuthErrorResponse("oauth_error", null);
+    }
+
+    private async Task SaveRefreshCredentialAsync(string clientId, string refreshToken, CancellationToken cancellationToken)
+    {
+        await credentialStore.WriteAsync(JsonSerializer.Serialize(new SavedMicrosoftCredential(clientId, refreshToken)), cancellationToken);
+    }
+
+    private async Task<SavedMicrosoftCredential?> ReadRefreshCredentialAsync(CancellationToken cancellationToken)
+    {
+        var value = await credentialStore.ReadAsync(cancellationToken);
+        return string.IsNullOrWhiteSpace(value) ? null : TryDeserialize<SavedMicrosoftCredential>(value);
+    }
+
+    private static T? TryDeserialize<T>(string content)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<T>(content, ApiJsonOptions);
+        }
+        catch (JsonException)
+        {
+            return default;
+        }
+    }
+
+    private static string ValidateClientId(string clientId)
+    {
+        if (!Guid.TryParse(clientId?.Trim(), out var parsed))
+        {
+            throw new ArgumentException("Enter Sakana's Microsoft application (client) ID in Settings first.", nameof(clientId));
+        }
+
+        return parsed.ToString("D");
+    }
+
+    private sealed record SavedMicrosoftCredential(
+        [property: JsonPropertyName("clientId")] string ClientId,
+        [property: JsonPropertyName("refreshToken")] string RefreshToken)
+    {
+        public override string ToString() => "SavedMicrosoftCredential(RefreshToken=[redacted])";
+    }
+
+    private sealed record DeviceCodeResponse(
+        [property: JsonPropertyName("device_code")] string DeviceCode,
+        [property: JsonPropertyName("user_code")] string UserCode,
+        [property: JsonPropertyName("verification_uri")] string VerificationUri,
+        [property: JsonPropertyName("message")] string? Message,
+        [property: JsonPropertyName("expires_in")] int ExpiresIn,
+        [property: JsonPropertyName("interval")] int Interval);
+
+    private sealed record OAuthTokenResponse(
+        [property: JsonPropertyName("access_token")] string AccessToken,
+        [property: JsonPropertyName("refresh_token")] string RefreshToken,
+        [property: JsonPropertyName("expires_in")] int ExpiresIn)
+    {
+        public override string ToString() => "OAuthTokenResponse(Tokens=[redacted])";
+    }
+
+    private sealed record OAuthErrorResponse(
+        [property: JsonPropertyName("error")] string? Error,
+        [property: JsonPropertyName("error_description")] string? Description);
+
+    private sealed record XboxTokenResponse(
+        [property: JsonPropertyName("Token")] string Token,
+        [property: JsonPropertyName("DisplayClaims")] XboxDisplayClaims? DisplayClaims)
+    {
+        public override string ToString() => "XboxTokenResponse(Token=[redacted])";
+    }
+
+    private sealed record XboxDisplayClaims(
+        [property: JsonPropertyName("xui")] IReadOnlyList<XboxUserClaim>? Xui);
+
+    private sealed record XboxUserClaim(
+        [property: JsonPropertyName("uhs")] string? UserHash,
+        [property: JsonPropertyName("xid")] string? XboxId);
+
+    private sealed record MinecraftTokenResponse(
+        [property: JsonPropertyName("access_token")] string AccessToken,
+        [property: JsonPropertyName("expires_in")] int ExpiresIn)
+    {
+        public override string ToString() => "MinecraftTokenResponse(AccessToken=[redacted])";
+    }
+
+    private sealed record MinecraftEntitlementsResponse(
+        [property: JsonPropertyName("items")] IReadOnlyList<MinecraftEntitlement>? Items);
+
+    private sealed record MinecraftEntitlement(
+        [property: JsonPropertyName("name")] string? Name);
+
+    private sealed record MinecraftProfileResponse(
+        [property: JsonPropertyName("id")] string? Id,
+        [property: JsonPropertyName("name")] string? Name);
+
+    private sealed record ApiErrorResponse(
+        [property: JsonPropertyName("errorMessage")] string? ErrorMessage,
+        [property: JsonPropertyName("message")] string? Message);
+
+    private sealed class MicrosoftOAuthException(string error, string message) : InvalidOperationException(message)
+    {
+        public string Error { get; } = error;
+    }
+}

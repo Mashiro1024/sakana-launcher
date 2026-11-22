@@ -1,0 +1,25 @@
+# Build output
+**/bin/
+**/obj/
+artifacts/
+tmp/
+
+# IDE state
+.vs/
+.idea/
+**/AGENTS.md
+*.user
+*.suo
+
+# Local packaging/signing output
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+*.pfx
+*.cer
+
+# Local debug captures
+/current-user-app.png
+/debug-dotnet-run.png
+/debug-import.png

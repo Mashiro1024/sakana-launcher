@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Sakana.App/Sakana.App.csproj" />
+    <Project Path="src/Sakana.Application/Sakana.Application.csproj" />
+    <Project Path="src/Sakana.Domain/Sakana.Domain.csproj" />
+    <Project Path="src/Sakana.Infrastructure/Sakana.Infrastructure.csproj" />
+    <Project Path="src/Sakana.Minecraft/Sakana.Minecraft.csproj" />
+  </Folder>
+</Solution>

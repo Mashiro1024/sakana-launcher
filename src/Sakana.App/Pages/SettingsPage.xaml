@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="Sakana.App.Pages.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="32,26,32,32" Spacing="22">
+            <StackPanel Spacing="4">
+                <TextBlock Text="设置" FontSize="32" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                <TextBlock Text="调整 Sakana Launcher 的外观、全局启动方式和本地数据。" FontSize="15" Foreground="{ThemeResource SakanaMutedBrush}" />
+            </StackPanel>
+
+            <InfoBar x:Name="SavedInfoBar" IsOpen="False" Severity="Success" Message="设置已保存。" />
+
+            <Border Padding="22" CornerRadius="16" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1">
+                <Grid ColumnSpacing="24">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="260" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Spacing="4" VerticalAlignment="Center">
+                        <TextBlock Text="应用主题" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                        <TextBlock Text="选择深色、浅色，或跟随 Windows 设置。" FontSize="13" Foreground="{ThemeResource SakanaMutedBrush}" />
+                    </StackPanel>
+                    <ComboBox x:Name="ThemeCombo" Grid.Column="1" SelectionChanged="ThemeCombo_SelectionChanged" VerticalAlignment="Center" HorizontalAlignment="Stretch">
+                        <ComboBoxItem Content="跟随 Windows" Tag="System" />
+                        <ComboBoxItem Content="深色" Tag="Dark" />
+                        <ComboBoxItem Content="浅色" Tag="Light" />
+                    </ComboBox>
+                </Grid>
+            </Border>
+
+            <Border Padding="22" CornerRadius="16" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="全局启动设置" FontSize="20" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                    <TextBlock Text="作为新实例的默认设置。实例可以在各自的“启动设置”中单独覆盖。Java 自动模式会先检测本机版本；缺少兼容版本时，安装实例会按需下载 Mojang Java。" FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource SakanaMutedBrush}" />
+                    <Pivot x:Name="GlobalSettingsTabs">
+                        <PivotItem Header="Java 和内存">
+                            <ScrollViewer MaxHeight="520" VerticalScrollBarVisibility="Auto">
+                                <StackPanel Spacing="10" Padding="4">
+                                    <ToggleSwitch x:Name="GlobalAutomaticMemoryToggle" Header="自动分配内存" OnContent="自动" OffContent="手动" Toggled="GlobalAutomaticMemoryToggle_Toggled" />
+                                    <TextBlock Text="自动模式会在每次启动时按设备可供 Java 使用的内存计算堆上限（1–16 GB）；游戏运行后不会热调整。手动模式使用下方的最小和最大值。" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource SakanaMutedBrush}" />
+                                    <StackPanel Spacing="8">
+                                        <NumberBox x:Name="GlobalMinMemoryInput" Header="最小内存（MB）" Minimum="256" Maximum="65536" SmallChange="256" LargeChange="1024" SpinButtonPlacementMode="Inline" />
+                                        <NumberBox x:Name="GlobalMaxMemoryInput" Header="最大内存（MB）" Minimum="256" Maximum="65536" SmallChange="256" LargeChange="1024" SpinButtonPlacementMode="Inline" />
+                                    </StackPanel>
+                                    <ToggleSwitch x:Name="GlobalCustomJavaToggle" Header="选择 Java 运行时" OnContent="自定义" OffContent="自动检测" Toggled="GlobalCustomJavaToggle_Toggled" />
+                                    <TextBlock Text="自动检测会按 Minecraft 要求选择匹配版本。安装时如果本机没有合适的 Java，Sakana 会下载对应运行时。" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource SakanaMutedBrush}" />
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <ComboBox x:Name="DetectedJavaCombo" PlaceholderText="检测本机已安装的 Java" IsEnabled="False" SelectionChanged="DetectedJavaCombo_SelectionChanged" />
+                                        <Button Grid.Column="1" Content="自动检测 Java" Click="DetectJava_Click" />
+                                    </Grid>
+                                    <TextBox x:Name="GlobalJavaPathInput" Header="Java 可执行文件" PlaceholderText="选择检测到的版本，或浏览 java.exe" IsEnabled="False" />
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <Button x:Name="BrowseGlobalJavaButton" Content="浏览 java.exe" Click="BrowseGlobalJava_Click" IsEnabled="False" />
+                                        <Button x:Name="UseAutomaticJavaButton" Content="自动选择并按需下载" Click="UseAutomaticJava_Click" />
+                                    </StackPanel>
+                                    <TextBox x:Name="GlobalJavaArgumentsInput" Header="自定义 Java 参数" PlaceholderText="例如：-XX:+UseG1GC -XX:+UnlockExperimentalVMOptions" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="60" />
+                                    <TextBox x:Name="GlobalEnvironmentVariablesInput" Header="自定义环境变量" PlaceholderText="每行一项，例如：&#10;MALLOC_ARENA_MAX=2&#10;JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF-8" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="80" />
+                                </StackPanel>
+                            </ScrollViewer>
+                        </PivotItem>
+                        <PivotItem Header="游戏窗口">
+                            <StackPanel Spacing="10" Padding="4">
+                                <TextBlock Text="默认窗口设置会用于跟随全局设置的新实例。" FontSize="12" Foreground="{ThemeResource SakanaMutedBrush}" />
+                                <ToggleSwitch x:Name="GlobalFullscreenToggle" Header="全屏启动" OnContent="全屏" OffContent="窗口" Toggled="GlobalFullscreenToggle_Toggled" />
+                                <NumberBox x:Name="GlobalWindowWidthInput" Header="窗口宽度" Minimum="640" Maximum="16384" SmallChange="16" LargeChange="100" SpinButtonPlacementMode="Inline" />
+                                <NumberBox x:Name="GlobalWindowHeightInput" Header="窗口高度" Minimum="480" Maximum="16384" SmallChange="16" LargeChange="100" SpinButtonPlacementMode="Inline" />
+                            </StackPanel>
+                        </PivotItem>
+                    </Pivot>
+                    <Button Content="保存全局启动设置" Click="SaveGlobalLaunchSettings_Click" HorizontalAlignment="Right" Padding="14,8" Style="{ThemeResource AccentButtonStyle}" FontWeight="SemiBold" />
+                </StackPanel>
+            </Border>
+
+            <Border Padding="22" CornerRadius="16" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="本地数据" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                    <TextBlock Text="主题、实例配置、游戏文件和 Java 运行时保存在此设备上。" FontSize="13" Foreground="{ThemeResource SakanaMutedBrush}" />
+                    <TextBox x:Name="DataDirectoryText" IsReadOnly="True" IsTabStop="True" />
+                    <TextBlock Text="卸载或迁移前，请先备份此目录。" FontSize="12" Foreground="{ThemeResource SakanaMutedBrush}" />
+                </StackPanel>
+            </Border>
+
+            <Border Padding="22" CornerRadius="16" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1">
+                <StackPanel Spacing="5">
+                    <TextBlock Text="关于 Sakana Launcher" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                    <TextBlock Text="面向 Windows 11 的独立 Minecraft Java 启动器。" FontSize="13" Foreground="{ThemeResource SakanaMutedBrush}" />
+                    <TextBlock Text="Sakana 是第三方项目，不是 Minecraft 官方产品，也未获 Mojang 或 Microsoft 认可或背书。" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource SakanaMutedBrush}" />
+                    <TextBlock Text="Sakana 0.1" FontSize="12" Foreground="{ThemeResource SakanaAccentBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

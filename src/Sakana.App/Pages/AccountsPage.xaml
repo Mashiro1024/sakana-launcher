@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="Sakana.App.Pages.AccountsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Padding="32,26,32,32">
+        <StackPanel Spacing="22">
+            <StackPanel Spacing="4">
+                <TextBlock Text="账户" FontSize="32" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                <TextBlock Text="管理用于启动 Minecraft 的游戏账户。" FontSize="15" Foreground="{ThemeResource SakanaMutedBrush}" />
+            </StackPanel>
+
+            <Border Padding="28" CornerRadius="16" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1">
+                <Grid ColumnSpacing="22">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Width="68" Height="68" CornerRadius="22" Background="{ThemeResource SakanaAccentSoftBrush}" VerticalAlignment="Top">
+                        <SymbolIcon Symbol="Contact" Foreground="{ThemeResource SakanaAccentBrush}" />
+                    </Border>
+                    <StackPanel Grid.Column="1" Spacing="10">
+                        <TextBlock Text="安全地连接你的账户" FontSize="21" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                        <TextBlock Text="使用 Microsoft 设备码登录。启动游戏前会检查 Minecraft Java Edition 资格；Sakana 不提供离线启动。刷新凭据由 Windows DPAPI 保护，访问令牌只保存在内存中。登录应用由 Sakana 内置管理。" FontSize="14" TextWrapping="Wrap" Foreground="{ThemeResource SakanaMutedBrush}" />
+                        <Border Background="{ThemeResource SakanaSurfaceRaisedBrush}" CornerRadius="10" Padding="12,9" HorizontalAlignment="Left">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Ellipse x:Name="AccountStatusDot" Width="8" Height="8" Fill="{ThemeResource SakanaMutedBrush}" VerticalAlignment="Center" />
+                                <TextBlock x:Name="AccountStatusText" Text="尚未连接账户" FontSize="12" Foreground="{ThemeResource SakanaMutedBrush}" />
+                            </StackPanel>
+                        </Border>
+                        <ProgressRing x:Name="SignInProgress" IsActive="False" Width="24" Height="24" HorizontalAlignment="Left" />
+                        <InfoBar x:Name="AccountInfoBar" IsOpen="False" Severity="Informational" IsClosable="True" />
+                        <HyperlinkButton x:Name="ClientIdApprovalLink" Content="查看 Minecraft Java API 官方申请流程" NavigateUri="https://help.minecraft.net/hc/en-us/articles/16254801392141-New-Java-Edition-Game-Service-API-Review-or-Application-Process" Visibility="Collapsed" />
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <Button x:Name="SignInButton" Content="登录 Microsoft 账户" Click="SignIn_Click" Padding="16,9" Style="{ThemeResource AccentButtonStyle}" FontWeight="SemiBold" />
+                            <Button x:Name="CancelSignInButton" Content="取消登录" Click="CancelSignIn_Click" Visibility="Collapsed" />
+                            <Button x:Name="SignOutButton" Content="退出登录" Click="SignOut_Click" Visibility="Collapsed" />
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </StackPanel>
+    </Grid>
+</Page>
