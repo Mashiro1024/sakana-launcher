@@ -326,6 +326,133 @@ public sealed class LauncherService(
             ?? throw new KeyNotFoundException("The selected instance profile no longer exists.");
     }
 
+    public async Task<InstanceProfile> SetInstanceOrganizationAsync(
+        Guid profileId,
+        string? groupName,
+        IReadOnlyCollection<string> tags,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(tags);
+        var profile = await store.GetProfileAsync(profileId, cancellationToken)
+            ?? throw new KeyNotFoundException("The selected instance profile no longer exists.");
+
+        var normalizedGroup = string.IsNullOrWhiteSpace(groupName)
+            ? null
+            : NormalizeRequired(groupName, "Group name", 40);
+        if (normalizedGroup?.Any(char.IsControl) == true)
+        {
+            throw new ArgumentException("分组名称不能包含控制字符。", nameof(groupName));
+        }
+
+        if (tags.Count > 20)
+        {
+            throw new ArgumentException("每个实例最多添加 20 个标签。", nameof(tags));
+        }
+
+        var normalizedTags = new List<string>();
+        foreach (var tag in tags)
+        {
+            if (string.IsNullOrWhiteSpace(tag)) continue;
+            var normalizedTag = tag.Trim();
+            if (normalizedTag.Length > 32 || normalizedTag.Any(char.IsControl))
+            {
+                throw new ArgumentException("标签最多 32 个字符，且不能包含控制字符。", nameof(tags));
+            }
+
+            if (!normalizedTags.Contains(normalizedTag, StringComparer.OrdinalIgnoreCase))
+            {
+                normalizedTags.Add(normalizedTag);
+            }
+        }
+
+        await store.SetInstanceOrganizationAsync(
+            profileId,
+            normalizedGroup,
+            JsonSerializer.Serialize(normalizedTags),
+            cancellationToken);
+        return await store.GetProfileAsync(profileId, cancellationToken)
+            ?? throw new KeyNotFoundException("The selected instance profile no longer exists.");
+    }
+
+    public async Task<InstanceProfile> SetProfileIconAsync(
+        Guid profileId,
+        string? iconSourcePath,
+        CancellationToken cancellationToken = default)
+    {
+        var profile = await store.GetProfileAsync(profileId, cancellationToken)
+            ?? throw new KeyNotFoundException("The selected instance profile no longer exists.");
+        var instanceRoot = Path.GetFullPath(Path.Combine(DataDirectory, "instances"));
+        EnsureNotReparsePoint(instanceRoot);
+        Directory.CreateDirectory(instanceRoot);
+        var directoryName = _instanceDirectoryNames.GetValueOrDefault(profileId, InstanceDirectoryName.ForProfile(profile));
+        var instanceDirectory = Path.GetFullPath(Path.Combine(instanceRoot, directoryName));
+        EnsureSafeInstanceDirectory(instanceRoot, instanceDirectory);
+        EnsureNotReparsePoint(instanceDirectory);
+        Directory.CreateDirectory(instanceDirectory);
+
+        if (string.IsNullOrWhiteSpace(iconSourcePath))
+        {
+            await store.SetProfileIconAsync(profileId, null, cancellationToken);
+            DeleteStoredProfileIcon(instanceDirectory, profile.IconFileName);
+            return await store.GetProfileAsync(profileId, cancellationToken)
+                ?? throw new KeyNotFoundException("The selected instance profile no longer exists.");
+        }
+
+        var sourcePath = Path.GetFullPath(iconSourcePath.Trim());
+        if (!File.Exists(sourcePath))
+        {
+            throw new FileNotFoundException("找不到所选图片。", sourcePath);
+        }
+
+        var extension = Path.GetExtension(sourcePath).ToLowerInvariant();
+        if (extension is not ".png" and not ".jpg" and not ".jpeg" and not ".bmp")
+        {
+            throw new ArgumentException("实例图标仅支持 PNG、JPG 或 BMP 图片。", nameof(iconSourcePath));
+        }
+
+        var sourceAttributes = File.GetAttributes(sourcePath);
+        if ((sourceAttributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new IOException("Sakana refused to import a redirected image file.");
+        }
+
+        if (new FileInfo(sourcePath).Length is 0 or > 5_242_880)
+        {
+            throw new ArgumentException("实例图标文件必须小于或等于 5 MB。", nameof(iconSourcePath));
+        }
+
+        var newIconFileName = $"Sakana.Icon-{Guid.NewGuid():N}{extension}";
+        var destinationPath = Path.Combine(instanceDirectory, newIconFileName);
+        await CopyFileAtomicallyAsync(sourcePath, destinationPath, cancellationToken);
+        try
+        {
+            await store.SetProfileIconAsync(profileId, newIconFileName, cancellationToken);
+        }
+        catch
+        {
+            if (File.Exists(destinationPath)) File.Delete(destinationPath);
+            throw;
+        }
+
+        DeleteStoredProfileIcon(instanceDirectory, profile.IconFileName);
+        return await store.GetProfileAsync(profileId, cancellationToken)
+            ?? throw new KeyNotFoundException("The selected instance profile no longer exists.");
+    }
+
+    private static void DeleteStoredProfileIcon(string instanceDirectory, string? iconFileName)
+    {
+        if (string.IsNullOrWhiteSpace(iconFileName) || !string.Equals(Path.GetFileName(iconFileName), iconFileName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var iconPath = Path.Combine(instanceDirectory, iconFileName);
+        if (File.Exists(iconPath) && (File.GetAttributes(iconPath) & FileAttributes.ReparsePoint) == 0)
+        {
+            File.Delete(iconPath);
+        }
+    }
+
     public async Task<bool> DeleteProfileAsync(Guid profileId, CancellationToken cancellationToken = default)
     {
         if (!_deletingProfiles.TryAdd(profileId, 0))

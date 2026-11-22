@@ -32,4 +32,7 @@ public sealed record InstanceProfile(
     bool UseGlobalLaunchSettings = false,
     string? ModrinthProjectId = null,
     string? ModrinthPackVersionId = null,
-    string? ModrinthPackVersionNumber = null);
+    string? ModrinthPackVersionNumber = null,
+    string? GroupName = null,
+    string TagsJson = "[]",
+    string? IconFileName = null);

@@ -22,6 +22,15 @@
             <InfoBar x:Name="RepairInfoBar" IsOpen="False" Severity="Success" IsClosable="True" />
             <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" Title="操作失败" />
 
+            <Grid x:Name="OrganizationToolbar" ColumnSpacing="12" Visibility="Collapsed">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="LibrarySearchBox" PlaceholderText="搜索实例名称、版本、分组或标签" TextChanged="LibrarySearch_TextChanged" />
+                <ComboBox x:Name="GroupFilterComboBox" Grid.Column="1" Header="分组" SelectionChanged="GroupFilter_SelectionChanged" />
+            </Grid>
+
             <Border x:Name="EmptyState" Padding="28" CornerRadius="16" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1">
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12" MaxWidth="440">
                     <Border Width="64" Height="64" CornerRadius="18" Background="{ThemeResource SakanaAccentSoftBrush}" HorizontalAlignment="Center">
@@ -33,7 +42,14 @@
                 </StackPanel>
             </Border>
 
-            <ItemsControl x:Name="ProfileItems" ItemsSource="{x:Bind ViewModel.Profiles, Mode=OneWay}" Visibility="Collapsed">
+            <Border x:Name="NoResultsState" Padding="24" CornerRadius="14" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1" Visibility="Collapsed">
+                <StackPanel Spacing="6">
+                    <TextBlock Text="没有匹配的实例" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                    <TextBlock Text="换个名称、版本、分组或标签试试。" FontSize="13" Foreground="{ThemeResource SakanaMutedBrush}" />
+                </StackPanel>
+            </Border>
+
+            <ItemsControl x:Name="ProfileItems" ItemsSource="{x:Bind ViewModel.VisibleProfiles, Mode=OneWay}" Visibility="Collapsed">
                 <ItemsControl.ItemContainerTransitions>
                     <TransitionCollection>
                         <AddDeleteThemeTransition />
@@ -55,11 +71,15 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <Border Width="54" Height="54" CornerRadius="14" Background="{ThemeResource SakanaAccentSoftBrush}">
-                                        <TextBlock Text="✦" FontSize="22" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{ThemeResource SakanaAccentBrush}" />
+                                        <Grid>
+                                            <TextBlock Text="✦" FontSize="22" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{ThemeResource SakanaAccentBrush}" Visibility="{x:Bind DefaultIconVisibility, Mode=OneWay}" />
+                                            <Image Source="{x:Bind IconImage, Mode=OneWay}" Visibility="{x:Bind CustomIconVisibility, Mode=OneWay}" Stretch="UniformToFill" />
+                                        </Grid>
                                     </Border>
                                     <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
                                         <TextBlock Text="{x:Bind Name, Mode=OneWay}" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
                                         <TextBlock Text="{x:Bind VersionLabel}" FontSize="13" Foreground="{ThemeResource SakanaMutedBrush}" />
+                                        <TextBlock Text="{x:Bind OrganizationLabel, Mode=OneWay}" Visibility="{x:Bind OrganizationVisibility, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource SakanaMutedBrush}" />
                                         <TextBlock Text="{x:Bind StateText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource SakanaAccentBrush}" />
                                         <TextBlock Text="{x:Bind LastError, Mode=OneWay}" Visibility="{x:Bind ErrorVisibility, Mode=OneWay}" FontSize="12" TextWrapping="Wrap" Foreground="#FFFF8C8C" />
                                     </StackPanel>

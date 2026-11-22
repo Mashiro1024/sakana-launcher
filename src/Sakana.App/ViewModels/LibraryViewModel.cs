@@ -12,6 +12,8 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
     private readonly DispatcherQueue _dispatcherQueue;
     private bool _hasProfiles;
     private GlobalLaunchSettings _globalLaunchSettings = GlobalLaunchSettings.Default;
+    private string _searchQuery = string.Empty;
+    private string? _groupFilter;
 
     public LibraryViewModel(
         ILauncherService launcherService,
@@ -26,6 +28,8 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
     }
 
     public ObservableCollection<InstanceCardViewModel> Profiles { get; } = [];
+
+    public ObservableCollection<InstanceCardViewModel> VisibleProfiles { get; } = [];
 
     public ObservableCollection<MinecraftGameVersion> AvailableVersions { get; } = [];
 
@@ -50,6 +54,7 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
         }
 
         HasProfiles = Profiles.Count > 0;
+        RefreshVisibleProfiles();
         return filesDeleted;
     }
 
@@ -60,7 +65,7 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
         CancellationToken cancellationToken = default)
     {
         var profile = await _launcherService.DuplicateProfileAsync(profileId, name, progress, cancellationToken);
-        Profiles.Insert(0, new InstanceCardViewModel(profile, _globalLaunchSettings));
+        AddProfile(profile);
         HasProfiles = true;
         return profile;
     }
@@ -69,6 +74,35 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
     {
         var updatedProfile = await _launcherService.RenameProfileAsync(profileId, name, cancellationToken);
         Profiles.FirstOrDefault(item => item.Id == profileId)?.Apply(updatedProfile);
+        RefreshVisibleProfiles();
+    }
+
+    public async Task SetInstanceOrganizationAsync(Guid profileId, string? groupName, IReadOnlyCollection<string> tags, CancellationToken cancellationToken = default)
+    {
+        var updatedProfile = await _launcherService.SetInstanceOrganizationAsync(profileId, groupName, tags, cancellationToken);
+        Profiles.FirstOrDefault(item => item.Id == profileId)?.Apply(updatedProfile);
+        RefreshVisibleProfiles();
+    }
+
+    public async Task SetProfileIconAsync(Guid profileId, string? iconSourcePath, CancellationToken cancellationToken = default)
+    {
+        var updatedProfile = await _launcherService.SetProfileIconAsync(profileId, iconSourcePath, cancellationToken);
+        Profiles.FirstOrDefault(item => item.Id == profileId)?.Apply(updatedProfile);
+    }
+
+    public IReadOnlyList<string> GetGroupNames() => Profiles
+        .Select(profile => profile.GroupName?.Trim())
+        .Where(group => !string.IsNullOrWhiteSpace(group))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(group => group, StringComparer.CurrentCultureIgnoreCase)
+        .Select(group => group!)
+        .ToArray();
+
+    public void ApplyLibraryFilter(string? searchQuery, string? groupFilter)
+    {
+        _searchQuery = searchQuery?.Trim() ?? string.Empty;
+        _groupFilter = string.IsNullOrWhiteSpace(groupFilter) ? null : groupFilter;
+        RefreshVisibleProfiles();
     }
 
     public Task<LauncherSettings> GetSettingsAsync(CancellationToken cancellationToken = default) =>
@@ -90,9 +124,10 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
         var settings = await _launcherService.GetSettingsAsync(cancellationToken);
         _globalLaunchSettings = settings.GlobalLaunchSettings;
         Profiles.Clear();
+        VisibleProfiles.Clear();
         foreach (var profile in await _launcherService.ListProfilesAsync(cancellationToken))
         {
-            Profiles.Add(new InstanceCardViewModel(profile, _globalLaunchSettings));
+            Profiles.Add(new InstanceCardViewModel(profile, _globalLaunchSettings, _launcherService.DataDirectory));
         }
 
         foreach (var process in _launcherService.GetActiveGameProcesses())
@@ -101,6 +136,7 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
         }
 
         HasProfiles = Profiles.Count > 0;
+        RefreshVisibleProfiles();
     }
 
     public async Task LoadAvailableVersionsAsync(CancellationToken cancellationToken = default)
@@ -121,7 +157,7 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
         CancellationToken cancellationToken = default)
     {
         var profile = await _launcherService.CreateProfileAsync(name, versionId, loaderType, loaderVersion, cancellationToken);
-        Profiles.Insert(0, new InstanceCardViewModel(profile, _globalLaunchSettings));
+        AddProfile(profile);
         HasProfiles = true;
         return profile;
     }
@@ -171,7 +207,7 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
             modrinthProjectId,
             modrinthVersionId,
             modrinthVersionNumber);
-        Profiles.Insert(0, new InstanceCardViewModel(profile, _globalLaunchSettings));
+        AddProfile(profile);
         HasProfiles = true;
         return profile;
     }
@@ -350,6 +386,21 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
     {
         var profile = Profiles.FirstOrDefault(item => item.Id == progress.InstanceId);
         profile?.ApplyProgress(progress);
+    }
+
+    private void AddProfile(InstanceProfile profile)
+    {
+        Profiles.Insert(0, new InstanceCardViewModel(profile, _globalLaunchSettings, _launcherService.DataDirectory));
+        RefreshVisibleProfiles();
+    }
+
+    private void RefreshVisibleProfiles()
+    {
+        VisibleProfiles.Clear();
+        foreach (var profile in Profiles.Where(profile => profile.MatchesFilter(_searchQuery, _groupFilter)))
+        {
+            VisibleProfiles.Add(profile);
+        }
     }
 
     private void OnGameProcessStatusChanged(MinecraftGameProcessStatus status)

@@ -14,6 +14,8 @@ namespace Sakana.App.Pages;
 
 public sealed partial class LibraryPage : Page
 {
+    private bool _updatingGroupFilter;
+
     public LibraryPage() : this(App.CurrentApp.LauncherService, App.CurrentApp.MinecraftAccountService)
     {
     }
@@ -33,8 +35,9 @@ public sealed partial class LibraryPage : Page
         try
         {
             await ViewModel.RefreshAsync();
-            EmptyState.Visibility = ViewModel.HasProfiles ? Visibility.Collapsed : Visibility.Visible;
-            ProfileItems.Visibility = ViewModel.HasProfiles ? Visibility.Visible : Visibility.Collapsed;
+            RefreshGroupFilterOptions();
+            ApplyLibraryFilter();
+            UpdateLibraryListVisibility();
         }
         catch (Exception exception)
         {
@@ -71,6 +74,7 @@ public sealed partial class LibraryPage : Page
         }
 
         var busy = profile.IsRunning || profile.IsLaunching || profile.ProfileState == InstanceProfileState.Installing;
+        AddItem("分组、标签与图标…", OrganizeProfile_Click, !busy);
         if (profile.ProfileState == InstanceProfileState.Installing)
         {
             AddItem("取消安装", CancelInstall_Click);
@@ -111,6 +115,172 @@ public sealed partial class LibraryPage : Page
         }
 
         menu.ShowAt(button);
+    }
+
+    private void LibrarySearch_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        ApplyLibraryFilter();
+        UpdateLibraryListVisibility();
+    }
+
+    private void GroupFilter_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_updatingGroupFilter) return;
+        ApplyLibraryFilter();
+        UpdateLibraryListVisibility();
+    }
+
+    private void ApplyLibraryFilter()
+    {
+        var selectedGroup = (GroupFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        ViewModel.ApplyLibraryFilter(LibrarySearchBox.Text, selectedGroup);
+    }
+
+    private void RefreshGroupFilterOptions(string? preferredGroup = null)
+    {
+        var currentGroup = preferredGroup ?? (GroupFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        _updatingGroupFilter = true;
+        try
+        {
+            GroupFilterComboBox.Items.Clear();
+            GroupFilterComboBox.Items.Add(new ComboBoxItem { Content = "全部实例", Tag = null });
+            foreach (var group in ViewModel.GetGroupNames())
+            {
+                GroupFilterComboBox.Items.Add(new ComboBoxItem { Content = group, Tag = group });
+            }
+
+            var match = GroupFilterComboBox.Items
+                .OfType<ComboBoxItem>()
+                .FirstOrDefault(item => string.Equals(item.Tag as string, currentGroup, StringComparison.OrdinalIgnoreCase));
+            GroupFilterComboBox.SelectedItem = match ?? GroupFilterComboBox.Items[0];
+        }
+        finally
+        {
+            _updatingGroupFilter = false;
+        }
+    }
+
+    private void UpdateLibraryListVisibility()
+    {
+        EmptyState.Visibility = ViewModel.HasProfiles ? Visibility.Collapsed : Visibility.Visible;
+        OrganizationToolbar.Visibility = ViewModel.HasProfiles ? Visibility.Visible : Visibility.Collapsed;
+        ProfileItems.Visibility = ViewModel.VisibleProfiles.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        NoResultsState.Visibility = ViewModel.HasProfiles && ViewModel.VisibleProfiles.Count == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private async void OrganizeProfile_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: Guid profileId }) return;
+        var profile = ViewModel.Profiles.FirstOrDefault(item => item.Id == profileId);
+        if (profile is null) return;
+
+        var groupInput = new TextBox
+        {
+            Header = "分组",
+            Text = profile.GroupName ?? string.Empty,
+            PlaceholderText = "例如：生存、整合包、测试",
+            MaxLength = 40
+        };
+        var tagsInput = new TextBox
+        {
+            Header = "标签",
+            Text = string.Join("，", profile.Tags),
+            PlaceholderText = "用逗号分隔，例如：轻量，联机，科技",
+            MaxLength = 640
+        };
+        var iconLabel = new TextBlock
+        {
+            Text = profile.IconFileName is null ? "使用默认图标" : "已设置自定义图标",
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"]
+        };
+        string? selectedIconPath = null;
+        var clearIcon = false;
+        var chooseIconButton = new Button { Content = "选择图片…" };
+        chooseIconButton.Click += async (_, _) =>
+        {
+            try
+            {
+                var picker = new FileOpenPicker(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(App.CurrentApp.WindowHandle));
+                picker.FileTypeFilter.Add(".png");
+                picker.FileTypeFilter.Add(".jpg");
+                picker.FileTypeFilter.Add(".jpeg");
+                picker.FileTypeFilter.Add(".bmp");
+                var selected = await picker.PickSingleFileAsync();
+                if (selected is null) return;
+                selectedIconPath = selected.Path;
+                clearIcon = false;
+                iconLabel.Text = Path.GetFileName(selected.Path);
+            }
+            catch (Exception exception)
+            {
+                iconLabel.Text = $"选择图片失败：{exception.Message}";
+            }
+        };
+        var resetIconButton = new Button { Content = "恢复默认图标" };
+        resetIconButton.Click += (_, _) =>
+        {
+            selectedIconPath = null;
+            clearIcon = true;
+            iconLabel.Text = "保存后恢复默认图标";
+        };
+        var iconActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        iconActions.Children.Add(chooseIconButton);
+        iconActions.Children.Add(resetIconButton);
+        var iconPanel = new StackPanel { Spacing = 8 };
+        iconPanel.Children.Add(new TextBlock { Text = "实例图标", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        iconPanel.Children.Add(iconLabel);
+        iconPanel.Children.Add(iconActions);
+
+        var content = new StackPanel { Spacing = 14, Width = 520 };
+        content.Children.Add(groupInput);
+        content.Children.Add(tagsInput);
+        content.Children.Add(new TextBlock
+        {
+            Text = "标签最多 20 个，每个不超过 32 个字符。自定义图标会复制到此实例文件夹中。",
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = 12,
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"]
+        });
+        content.Children.Add(iconPanel);
+
+        var dialog = new ContentDialog
+        {
+            Title = $"整理实例 · {profile.Name}",
+            Content = content,
+            PrimaryButtonText = "保存",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = XamlRoot
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+
+        try
+        {
+            var tags = tagsInput.Text.Split([',', '，', ';', '；'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            await ViewModel.SetInstanceOrganizationAsync(profileId, groupInput.Text, tags);
+            if (clearIcon || selectedIconPath is not null)
+            {
+                await ViewModel.SetProfileIconAsync(profileId, clearIcon ? null : selectedIconPath);
+            }
+
+            var selectedGroup = (GroupFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
+            RefreshGroupFilterOptions(selectedGroup);
+            ApplyLibraryFilter();
+            UpdateLibraryListVisibility();
+            RepairInfoBar.Severity = InfoBarSeverity.Success;
+            RepairInfoBar.Title = "实例信息已保存";
+            RepairInfoBar.Message = "分组、标签和图标已更新。";
+            RepairInfoBar.IsOpen = true;
+            ErrorInfoBar.IsOpen = false;
+        }
+        catch (Exception exception)
+        {
+            await App.CurrentApp.Logger.ErrorAsync("profile.organization_update_failed", "Could not update instance organization or icon.", exception);
+            ShowError("无法保存实例信息", exception.Message, string.Empty);
+        }
     }
 
     private async void ManageWorldsAndServers_Click(object sender, RoutedEventArgs e)
@@ -485,6 +655,9 @@ public sealed partial class LibraryPage : Page
                 await progressDialogOperation;
             }
 
+            RefreshGroupFilterOptions();
+            ApplyLibraryFilter();
+            UpdateLibraryListVisibility();
             ErrorInfoBar.IsOpen = false;
             RepairInfoBar.Severity = InfoBarSeverity.Success;
             RepairInfoBar.Title = "实例副本已创建";
@@ -959,6 +1132,8 @@ public sealed partial class LibraryPage : Page
         try
         {
             await ViewModel.RenameProfileAsync(profileId, nameInput.Text);
+            ApplyLibraryFilter();
+            UpdateLibraryListVisibility();
             RepairInfoBar.Severity = InfoBarSeverity.Success;
             RepairInfoBar.Title = "实例已重命名";
             RepairInfoBar.Message = $"新名称：{nameInput.Text.Trim()}";
@@ -1038,6 +1213,9 @@ public sealed partial class LibraryPage : Page
         try
         {
             var filesDeleted = await ViewModel.DeleteProfileAsync(profileId);
+            RefreshGroupFilterOptions();
+            ApplyLibraryFilter();
+            UpdateLibraryListVisibility();
             ErrorInfoBar.IsOpen = false;
             RepairInfoBar.Severity = filesDeleted ? InfoBarSeverity.Success : InfoBarSeverity.Warning;
             RepairInfoBar.Title = filesDeleted ? "实例和文件已删除" : "实例已删除，文件清理稍后重试";
@@ -2468,8 +2646,9 @@ public sealed partial class LibraryPage : Page
                 modrinthProjectId: modrinthProjectId,
                 modrinthVersionId: modrinthVersionId,
                 modrinthVersionNumber: modrinthVersionNumber);
-            EmptyState.Visibility = Visibility.Collapsed;
-            ProfileItems.Visibility = Visibility.Visible;
+            RefreshGroupFilterOptions();
+            ApplyLibraryFilter();
+            UpdateLibraryListVisibility();
             ErrorInfoBar.IsOpen = false;
         }
         catch (ProfileNameInUseException)
@@ -2916,8 +3095,9 @@ public sealed partial class LibraryPage : Page
         {
             await ViewModel.CreateProfileAsync(nameInput.Text, version.Id, loaderType, loaderVersion);
             ErrorInfoBar.IsOpen = false;
-            EmptyState.Visibility = Visibility.Collapsed;
-            ProfileItems.Visibility = Visibility.Visible;
+            RefreshGroupFilterOptions();
+            ApplyLibraryFilter();
+            UpdateLibraryListVisibility();
         }
         catch (ProfileNameInUseException)
         {

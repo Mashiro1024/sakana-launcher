@@ -22,6 +22,8 @@ public interface ILauncherService
         IProgress<InstanceCopyProgress>? progress = null,
         CancellationToken cancellationToken = default);
     Task<InstanceProfile> RenameProfileAsync(Guid profileId, string name, CancellationToken cancellationToken = default);
+    Task<InstanceProfile> SetInstanceOrganizationAsync(Guid profileId, string? groupName, IReadOnlyCollection<string> tags, CancellationToken cancellationToken = default);
+    Task<InstanceProfile> SetProfileIconAsync(Guid profileId, string? iconSourcePath, CancellationToken cancellationToken = default);
     Task<bool> DeleteProfileAsync(Guid profileId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MinecraftLaunchHistoryEntry>> GetLaunchHistoryAsync(int limit = 20, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MinecraftGameVersion>> GetReleaseVersionsAsync(CancellationToken cancellationToken = default);

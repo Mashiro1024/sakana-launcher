@@ -15,6 +15,7 @@ Current development includes:
 - Creating and managing isolated Vanilla, Fabric, Quilt, Forge, and NeoForge instances.
 - Importing and exporting Modrinth `.mrpack` files, browsing Modrinth modpacks, and reviewing or applying linked pack updates.
 - Searching for compatible Modrinth mods, resource packs, shaders, and data packs, plus local content management.
+- Organizing instances with groups, tags, search, and per-instance custom icons.
 - Global and per-instance Java, memory, JVM argument, environment variable, and game-window settings.
 - Microsoft device-code sign-in flow and Minecraft account checks.
 

@@ -74,7 +74,7 @@ public sealed class SqliteLauncherStore : ILauncherStore
 
             command.CommandText = "PRAGMA user_version;";
             var schemaVersion = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
-            if (schemaVersion > 12)
+            if (schemaVersion > 13)
             {
                 throw new InvalidOperationException($"Sakana database version {schemaVersion} is newer than this app supports.");
             }
@@ -256,6 +256,20 @@ public sealed class SqliteLauncherStore : ILauncherStore
                 schemaVersion = 12;
             }
 
+            if (schemaVersion == 12)
+            {
+                command.CommandText = """
+                    BEGIN IMMEDIATE;
+                    ALTER TABLE InstanceProfiles ADD COLUMN GroupName TEXT NULL;
+                    ALTER TABLE InstanceProfiles ADD COLUMN TagsJson TEXT NOT NULL DEFAULT '[]';
+                    ALTER TABLE InstanceProfiles ADD COLUMN IconFileName TEXT NULL;
+                    PRAGMA user_version = 13;
+                    COMMIT;
+                    """;
+                await command.ExecuteNonQueryAsync(cancellationToken);
+                schemaVersion = 13;
+            }
+
             _initialized = true;
         }
         finally
@@ -332,7 +346,7 @@ public sealed class SqliteLauncherStore : ILauncherStore
         command.CommandText = """
             SELECT Id, Name, VersionId, State, CreatedAtUtc, LastError, MinMemoryMb, MaxMemoryMb, LoaderType, LoaderVersion, ModrinthPackPath, ModrinthSelectedOptionalFilesJson,
                    UseAutomaticMemory, JavaExecutablePath, CustomJavaArguments, CustomEnvironmentVariablesJson, Fullscreen, WindowWidth, WindowHeight, UseGlobalLaunchSettings,
-                   ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber
+                   ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber, GroupName, TagsJson, IconFileName
             FROM InstanceProfiles
             ORDER BY CreatedAtUtc DESC;
             """;
@@ -355,7 +369,7 @@ public sealed class SqliteLauncherStore : ILauncherStore
         command.CommandText = """
             SELECT Id, Name, VersionId, State, CreatedAtUtc, LastError, MinMemoryMb, MaxMemoryMb, LoaderType, LoaderVersion, ModrinthPackPath, ModrinthSelectedOptionalFilesJson,
                    UseAutomaticMemory, JavaExecutablePath, CustomJavaArguments, CustomEnvironmentVariablesJson, Fullscreen, WindowWidth, WindowHeight, UseGlobalLaunchSettings,
-                   ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber
+                   ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber, GroupName, TagsJson, IconFileName
             FROM InstanceProfiles
             WHERE Id = $id;
             """;
@@ -438,8 +452,8 @@ public sealed class SqliteLauncherStore : ILauncherStore
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT INTO InstanceProfiles (Id, Name, VersionId, State, CreatedAtUtc, MinMemoryMb, MaxMemoryMb, LoaderType, LoaderVersion, ModrinthPackPath, ModrinthSelectedOptionalFilesJson, UseGlobalLaunchSettings, ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber)
-            VALUES ($id, $name, $version, $state, $created, $minMemoryMb, $maxMemoryMb, $loaderType, $loaderVersion, $modrinthPackPath, $modrinthSelectedOptionalFilesJson, $useGlobalSettings, $modrinthProjectId, $modrinthPackVersionId, $modrinthPackVersionNumber)
+            INSERT INTO InstanceProfiles (Id, Name, VersionId, State, CreatedAtUtc, MinMemoryMb, MaxMemoryMb, LoaderType, LoaderVersion, ModrinthPackPath, ModrinthSelectedOptionalFilesJson, UseGlobalLaunchSettings, ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber, GroupName, TagsJson, IconFileName)
+            VALUES ($id, $name, $version, $state, $created, $minMemoryMb, $maxMemoryMb, $loaderType, $loaderVersion, $modrinthPackPath, $modrinthSelectedOptionalFilesJson, $useGlobalSettings, $modrinthProjectId, $modrinthPackVersionId, $modrinthPackVersionNumber, $groupName, $tagsJson, $iconFileName)
             ON CONFLICT(Name) DO NOTHING;
             """;
         command.Parameters.AddWithValue("$id", profile.Id.ToString("D"));
@@ -457,8 +471,40 @@ public sealed class SqliteLauncherStore : ILauncherStore
         command.Parameters.AddWithValue("$modrinthProjectId", (object?)profile.ModrinthProjectId ?? DBNull.Value);
         command.Parameters.AddWithValue("$modrinthPackVersionId", (object?)profile.ModrinthPackVersionId ?? DBNull.Value);
         command.Parameters.AddWithValue("$modrinthPackVersionNumber", (object?)profile.ModrinthPackVersionNumber ?? DBNull.Value);
+        command.Parameters.AddWithValue("$groupName", (object?)profile.GroupName ?? DBNull.Value);
+        command.Parameters.AddWithValue("$tagsJson", profile.TagsJson);
+        command.Parameters.AddWithValue("$iconFileName", (object?)profile.IconFileName ?? DBNull.Value);
 
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
+    public async Task SetInstanceOrganizationAsync(Guid profileId, string? groupName, string tagsJson, CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE InstanceProfiles SET GroupName = $groupName, TagsJson = $tagsJson WHERE Id = $id;";
+        command.Parameters.AddWithValue("$groupName", (object?)groupName ?? DBNull.Value);
+        command.Parameters.AddWithValue("$tagsJson", tagsJson);
+        command.Parameters.AddWithValue("$id", profileId.ToString("D"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
+        {
+            throw new KeyNotFoundException("The selected instance profile no longer exists.");
+        }
+    }
+
+    public async Task SetProfileIconAsync(Guid profileId, string? iconFileName, CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE InstanceProfiles SET IconFileName = $iconFileName WHERE Id = $id;";
+        command.Parameters.AddWithValue("$iconFileName", (object?)iconFileName ?? DBNull.Value);
+        command.Parameters.AddWithValue("$id", profileId.ToString("D"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
+        {
+            throw new KeyNotFoundException("The selected instance profile no longer exists.");
+        }
     }
 
     public async Task UpdateModrinthPackSourceAsync(
@@ -657,7 +703,10 @@ public sealed class SqliteLauncherStore : ILauncherStore
         reader.GetInt32(19) != 0,
         reader.IsDBNull(20) ? null : reader.GetString(20),
         reader.IsDBNull(21) ? null : reader.GetString(21),
-        reader.IsDBNull(22) ? null : reader.GetString(22));
+        reader.IsDBNull(22) ? null : reader.GetString(22),
+        reader.IsDBNull(23) ? null : reader.GetString(23),
+        reader.GetString(24),
+        reader.IsDBNull(25) ? null : reader.GetString(25));
 
     private static string FormatUtc(DateTimeOffset timestamp) =>
         timestamp.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture);

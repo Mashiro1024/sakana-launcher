@@ -1,19 +1,32 @@
 using Sakana.Application;
 using Sakana.Domain;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using System.Text.Json;
 
 namespace Sakana.App.ViewModels;
 
-public sealed class InstanceCardViewModel(InstanceProfile profile, GlobalLaunchSettings? globalLaunchSettings = null) : ViewModelBase
+public sealed class InstanceCardViewModel : ViewModelBase
 {
-    private InstanceProfile _profile = profile;
-    private readonly GlobalLaunchSettings _globalLaunchSettings = globalLaunchSettings ?? GlobalLaunchSettings.Default;
+    private InstanceProfile _profile;
+    private readonly GlobalLaunchSettings _globalLaunchSettings;
+    private readonly string _dataDirectory;
     private double _progressValue;
     private string _progressStatus = string.Empty;
     private bool _isRunning;
     private bool _isLaunching;
     private int? _processId;
     private string? _lastLaunchStatus;
+    private ImageSource? _iconImage;
+
+    public InstanceCardViewModel(InstanceProfile profile, GlobalLaunchSettings? globalLaunchSettings = null, string? dataDirectory = null)
+    {
+        _profile = profile;
+        _globalLaunchSettings = globalLaunchSettings ?? GlobalLaunchSettings.Default;
+        _dataDirectory = dataDirectory ?? string.Empty;
+        UpdateIconImage();
+    }
 
     public Guid Id => _profile.Id;
     public InstanceProfileState ProfileState => _profile.State;
@@ -23,6 +36,23 @@ public sealed class InstanceCardViewModel(InstanceProfile profile, GlobalLaunchS
     public bool SupportsModManagement => _profile.LoaderType is MinecraftLoaderType.Fabric or MinecraftLoaderType.Quilt or MinecraftLoaderType.Forge or MinecraftLoaderType.NeoForge;
     public string Name => _profile.Name;
     public string VersionId => _profile.VersionId;
+    public string? GroupName => _profile.GroupName;
+    public string? IconFileName => _profile.IconFileName;
+    public IReadOnlyList<string> Tags => ParseTags(_profile.TagsJson);
+    public ImageSource? IconImage => _iconImage;
+    public Visibility CustomIconVisibility => _iconImage is null ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility DefaultIconVisibility => _iconImage is null ? Visibility.Visible : Visibility.Collapsed;
+    public string OrganizationLabel
+    {
+        get
+        {
+            var items = new List<string>();
+            if (!string.IsNullOrWhiteSpace(_profile.GroupName)) items.Add(_profile.GroupName);
+            items.AddRange(Tags);
+            return string.Join(" · ", items);
+        }
+    }
+    public Visibility OrganizationVisibility => string.IsNullOrWhiteSpace(OrganizationLabel) ? Visibility.Collapsed : Visibility.Visible;
     public string VersionLabel => _profile.LoaderType switch
     {
         MinecraftLoaderType.Fabric => $"Minecraft {_profile.VersionId} · Fabric {_profile.LoaderVersion}",
@@ -144,6 +174,7 @@ public sealed class InstanceCardViewModel(InstanceProfile profile, GlobalLaunchS
     public void Apply(InstanceProfile profile)
     {
         _profile = profile;
+        UpdateIconImage();
         if (profile.State != InstanceProfileState.Installing)
         {
             ProgressValue = profile.State == InstanceProfileState.Installed ? 100 : 0;
@@ -156,6 +187,11 @@ public sealed class InstanceCardViewModel(InstanceProfile profile, GlobalLaunchS
         OnPropertyChanged(nameof(UseGlobalLaunchSettings));
         OnPropertyChanged(nameof(UseAutomaticMemory));
         OnPropertyChanged(nameof(Name));
+        OnPropertyChanged(nameof(GroupName));
+        OnPropertyChanged(nameof(IconFileName));
+        OnPropertyChanged(nameof(Tags));
+        OnPropertyChanged(nameof(OrganizationLabel));
+        OnPropertyChanged(nameof(OrganizationVisibility));
         OnPropertyChanged(nameof(JavaExecutablePath));
         OnPropertyChanged(nameof(CustomJavaArguments));
         OnPropertyChanged(nameof(CustomEnvironmentVariablesJson));
@@ -163,6 +199,63 @@ public sealed class InstanceCardViewModel(InstanceProfile profile, GlobalLaunchS
         OnPropertyChanged(nameof(WindowWidth));
         OnPropertyChanged(nameof(WindowHeight));
         OnPropertyChanged(nameof(MemoryLabel));
+    }
+
+    public bool MatchesFilter(string query, string? groupFilter)
+    {
+        if (!string.IsNullOrWhiteSpace(groupFilter) &&
+            !string.Equals(_profile.GroupName, groupFilter, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(query)) return true;
+        return _profile.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+               VersionLabel.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+               (_profile.GroupName?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
+               Tags.Any(tag => tag.Contains(query, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void UpdateIconImage()
+    {
+        _iconImage = null;
+        if (!string.IsNullOrWhiteSpace(_profile.IconFileName) &&
+            string.Equals(Path.GetFileName(_profile.IconFileName), _profile.IconFileName, StringComparison.Ordinal) &&
+            !string.IsNullOrWhiteSpace(_dataDirectory))
+        {
+            var directoryName = InstanceDirectoryName.ForProfile(_profile);
+            var iconPath = Path.Combine(_dataDirectory, "instances", directoryName, _profile.IconFileName);
+            if (File.Exists(iconPath))
+            {
+                try
+                {
+                    var bitmap = new BitmapImage { DecodePixelWidth = 128 };
+                    bitmap.UriSource = new Uri(Path.GetFullPath(iconPath), UriKind.Absolute);
+                    _iconImage = bitmap;
+                }
+                catch (Exception)
+                {
+                    _iconImage = null;
+                }
+            }
+        }
+
+        OnPropertyChanged(nameof(IconImage));
+        OnPropertyChanged(nameof(CustomIconVisibility));
+        OnPropertyChanged(nameof(DefaultIconVisibility));
+    }
+
+    private static IReadOnlyList<string> ParseTags(string? tagsJson)
+    {
+        if (string.IsNullOrWhiteSpace(tagsJson)) return [];
+        try
+        {
+            return JsonSerializer.Deserialize<string[]>(tagsJson) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 
     public void ApplyProgress(InstallationProgress progress)

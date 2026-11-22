@@ -13,6 +13,8 @@ public interface ILauncherStore
     Task<IReadOnlyList<InstanceProfile>> ListProfilesAsync(CancellationToken cancellationToken = default);
     Task<InstanceProfile?> GetProfileAsync(Guid profileId, CancellationToken cancellationToken = default);
     Task<bool> TryCreateProfileAsync(InstanceProfile profile, CancellationToken cancellationToken = default);
+    Task SetInstanceOrganizationAsync(Guid profileId, string? groupName, string tagsJson, CancellationToken cancellationToken = default);
+    Task SetProfileIconAsync(Guid profileId, string? iconFileName, CancellationToken cancellationToken = default);
     Task UpdateModrinthPackSourceAsync(Guid profileId, string packPath, string versionId, string versionNumber, string selectedOptionalFilesJson, CancellationToken cancellationToken = default);
     Task<bool> TryRenameProfileAsync(Guid profileId, string name, CancellationToken cancellationToken = default);
     Task DeleteProfileAsync(Guid profileId, CancellationToken cancellationToken = default);
