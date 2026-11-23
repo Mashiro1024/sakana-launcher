@@ -56,6 +56,8 @@ public interface ILauncherService
     Task<IReadOnlyList<ModrinthModRelease>> GetCompatibleModrinthContentVersionsAsync(Guid profileId, ModrinthContentKind kind, string projectId, CancellationToken cancellationToken = default);
     Task<ModrinthContentInstallResult> InstallModrinthContentVersionAsync(Guid profileId, ModrinthContentKind kind, string versionId, string? worldName = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<string>> ListMinecraftWorldsAsync(Guid profileId, CancellationToken cancellationToken = default);
+    Task ExportWorldBackupAsync(Guid profileId, string worldName, string destinationPath, CancellationToken cancellationToken = default);
+    Task<string> ImportWorldBackupAsync(Guid profileId, string archivePath, string worldName, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MinecraftLocalPack>> ListLocalPacksAsync(Guid profileId, MinecraftLocalPackKind kind, string? worldName = null, CancellationToken cancellationToken = default);
     Task<LocalPackImportResult> ImportLocalPacksAsync(Guid profileId, MinecraftLocalPackKind kind, IReadOnlyCollection<string> sourcePaths, string? worldName = null, CancellationToken cancellationToken = default);
     Task SetLocalPackEnabledAsync(Guid profileId, MinecraftLocalPackKind kind, string fileName, bool isEnabled, string? worldName = null, CancellationToken cancellationToken = default);

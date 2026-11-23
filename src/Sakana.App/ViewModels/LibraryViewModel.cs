@@ -268,6 +268,12 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
     public Task<IReadOnlyList<string>> ListMinecraftWorldsAsync(Guid profileId, CancellationToken cancellationToken = default) =>
         _launcherService.ListMinecraftWorldsAsync(profileId, cancellationToken);
 
+    public Task ExportWorldBackupAsync(Guid profileId, string worldName, string destinationPath, CancellationToken cancellationToken = default) =>
+        _launcherService.ExportWorldBackupAsync(profileId, worldName, destinationPath, cancellationToken);
+
+    public Task<string> ImportWorldBackupAsync(Guid profileId, string archivePath, string worldName, CancellationToken cancellationToken = default) =>
+        _launcherService.ImportWorldBackupAsync(profileId, archivePath, worldName, cancellationToken);
+
     public Task<IReadOnlyList<MinecraftServerBookmark>> ListServerBookmarksAsync(Guid profileId, CancellationToken cancellationToken = default) =>
         _launcherService.ListServerBookmarksAsync(profileId, cancellationToken);
 

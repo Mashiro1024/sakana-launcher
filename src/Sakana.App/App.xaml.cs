@@ -48,13 +48,14 @@ public partial class App : Microsoft.UI.Xaml.Application
         var modrinthModpackService = new ModrinthModpackService(_httpClient);
         var localModService = new LocalFabricModService(store.DataDirectory);
         var localPackService = new LocalMinecraftPackService(store.DataDirectory);
+        var localMinecraftWorldService = new LocalMinecraftWorldService(store.DataDirectory);
         var localMinecraftServerService = new LocalMinecraftServerService(store.DataDirectory);
         var modrinthModCatalog = new ModrinthModCatalog(_httpClient, store.DataDirectory, localModService, localPackService);
         var installer = new MinecraftInstaller(_httpClient, store.DataDirectory, metadataClient, fabricLoaderCatalog, quiltLoaderCatalog, forgeNeoForgeLoaderCatalog, javaRuntimeManager, modrinthModpackService);
         var launchPlanner = new MinecraftLaunchPlanner(store.DataDirectory, metadataClient, javaRuntimeManager);
         var credentialStore = new WindowsDpapiMicrosoftCredentialStore(store.DataDirectory);
         MinecraftAccountService = new MicrosoftMinecraftAccountService(_httpClient, credentialStore);
-        LauncherService = new LauncherService(store, metadataClient, fabricLoaderCatalog, quiltLoaderCatalog, forgeNeoForgeLoaderCatalog, modrinthModpackService, modrinthModCatalog, localModService, localPackService, localMinecraftServerService, javaRuntimeManager, installer, launchPlanner, new MinecraftProcessRunner(), Logger);
+        LauncherService = new LauncherService(store, metadataClient, fabricLoaderCatalog, quiltLoaderCatalog, forgeNeoForgeLoaderCatalog, modrinthModpackService, modrinthModCatalog, localModService, localPackService, localMinecraftWorldService, localMinecraftServerService, javaRuntimeManager, installer, launchPlanner, new MinecraftProcessRunner(), Logger);
         var settings = Sakana.Domain.LauncherSettings.Default;
 
         try

@@ -14,6 +14,7 @@ public sealed class LauncherService(
     IModrinthModCatalog modrinthModCatalog,
     ILocalModService localModService,
     ILocalPackService localPackService,
+    ILocalMinecraftWorldService localMinecraftWorldService,
     ILocalMinecraftServerService localMinecraftServerService,
     IJavaRuntimeCatalog javaRuntimeCatalog,
     IMinecraftInstaller installer,
@@ -1470,6 +1471,50 @@ public sealed class LauncherService(
     {
         var profile = await GetInstalledProfileForContentAsync(profileId, cancellationToken);
         return await localPackService.ListWorldsAsync(InstanceDirectoryName.ForProfile(profile), cancellationToken);
+    }
+
+    public async Task ExportWorldBackupAsync(
+        Guid profileId,
+        string worldName,
+        string destinationPath,
+        CancellationToken cancellationToken = default)
+    {
+        var profile = await GetInstalledProfileForContentAsync(profileId, cancellationToken);
+        ReserveContentChanges(profileId);
+        try
+        {
+            await localMinecraftWorldService.ExportBackupAsync(
+                InstanceDirectoryName.ForProfile(profile),
+                worldName,
+                destinationPath,
+                cancellationToken);
+        }
+        finally
+        {
+            _contentReservations.TryRemove(profileId, out _);
+        }
+    }
+
+    public async Task<string> ImportWorldBackupAsync(
+        Guid profileId,
+        string archivePath,
+        string worldName,
+        CancellationToken cancellationToken = default)
+    {
+        var profile = await GetInstalledProfileForContentAsync(profileId, cancellationToken);
+        ReserveContentChanges(profileId);
+        try
+        {
+            return await localMinecraftWorldService.ImportBackupAsync(
+                InstanceDirectoryName.ForProfile(profile),
+                archivePath,
+                worldName,
+                cancellationToken);
+        }
+        finally
+        {
+            _contentReservations.TryRemove(profileId, out _);
+        }
     }
 
     public async Task<IReadOnlyList<MinecraftServerBookmark>> ListServerBookmarksAsync(Guid profileId, CancellationToken cancellationToken = default)

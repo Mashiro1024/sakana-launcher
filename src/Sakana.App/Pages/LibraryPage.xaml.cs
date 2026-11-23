@@ -329,6 +329,22 @@ public sealed partial class LibraryPage : Page
             var servers = await ViewModel.ListServerBookmarksAsync(profileId);
             var worldList = new StackPanel { Spacing = 8 };
             var serverList = new StackPanel { Spacing = 8 };
+            var worldArchiveStatus = new TextBlock
+            {
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"],
+                Visibility = Visibility.Collapsed
+            };
+            var worldImportNameInput = new TextBox
+            {
+                Header = "导入为",
+                PlaceholderText = "世界名称",
+                Width = 250,
+                MaxLength = 80,
+                Visibility = Visibility.Collapsed
+            };
+            var worldImportConfirmButton = new Button { Content = "导入世界", Visibility = Visibility.Collapsed };
+            string? pendingWorldArchivePath = null;
             var serverNameInput = new TextBox { Header = "收藏名称", PlaceholderText = "例如：生存服", MaxLength = 80 };
             var serverAddressInput = new TextBox { Header = "服务器地址", PlaceholderText = "play.example.net:25565", MaxLength = 255 };
             var serverError = new TextBlock { Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SystemFillColorCriticalBrush"], TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
@@ -349,7 +365,7 @@ public sealed partial class LibraryPage : Page
                 {
                     worldList.Children.Add(new TextBlock
                     {
-                        Text = "此实例还没有世界。先启动 Minecraft 创建世界，之后可在这里打开存档目录或直接快速启动。",
+                        Text = "此实例还没有世界。可以导入世界 ZIP 备份，或启动 Minecraft 创建新世界。",
                         TextWrapping = TextWrapping.Wrap,
                         Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"]
                     });
@@ -369,6 +385,42 @@ public sealed partial class LibraryPage : Page
                     var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
                     var openButton = new Button { Content = "打开文件夹", Tag = worldName };
                     openButton.Click += (_, _) => OpenWorldFolder(profileId, worldName);
+                    var backupButton = new Button { Content = "备份 ZIP…", Tag = worldName };
+                    backupButton.Click += async (_, _) =>
+                    {
+                        try
+                        {
+                            var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(App.CurrentApp.WindowHandle);
+                            var picker = new FileSavePicker(windowId)
+                            {
+                                SuggestedFileName = worldName,
+                                DefaultFileExtension = ".zip",
+                                CommitButtonText = "保存备份"
+                            };
+                            picker.FileTypeChoices.Add("Minecraft 世界备份", new List<string> { ".zip" });
+                            var destination = await picker.PickSaveFileAsync();
+                            if (destination is null) return;
+
+                            backupButton.IsEnabled = false;
+                            worldArchiveStatus.Text = $"正在备份“{worldName}”…";
+                            worldArchiveStatus.Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"];
+                            worldArchiveStatus.Visibility = Visibility.Visible;
+                            await ViewModel.ExportWorldBackupAsync(profileId, worldName, destination.Path);
+                            worldArchiveStatus.Text = $"已备份“{worldName}”：{destination.Path}";
+                            await App.CurrentApp.Logger.InformationAsync("world.backup_exported", $"A world backup was exported for instance {profile.Name}.");
+                        }
+                        catch (Exception exception)
+                        {
+                            worldArchiveStatus.Text = $"备份失败：{exception.Message}";
+                            worldArchiveStatus.Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SystemFillColorCriticalBrush"];
+                            worldArchiveStatus.Visibility = Visibility.Visible;
+                            await App.CurrentApp.Logger.ErrorAsync("world.backup_export_failed", "A Minecraft world backup could not be exported.", exception);
+                        }
+                        finally
+                        {
+                            backupButton.IsEnabled = true;
+                        }
+                    };
                     var launchButton = new Button { Content = "快速启动", Tag = worldName, Style = (Style)Microsoft.UI.Xaml.Application.Current.Resources["AccentButtonStyle"] };
                     launchButton.Click += async (_, _) =>
                     {
@@ -376,6 +428,7 @@ public sealed partial class LibraryPage : Page
                         await LaunchProfileWithQuickPlayAsync(profileId, new MinecraftQuickPlayTarget(MinecraftQuickPlayKind.SingleplayerWorld, worldName));
                     };
                     actions.Children.Add(openButton);
+                    actions.Children.Add(backupButton);
                     actions.Children.Add(launchButton);
                     Grid.SetColumn(actions, 1);
                     row.Children.Add(actions);
@@ -444,11 +497,75 @@ public sealed partial class LibraryPage : Page
             AddWorldRows();
             AddServerRows();
 
+            var worldImportButton = new Button { Content = "导入世界 ZIP…" };
+            worldImportButton.Click += async (_, _) =>
+            {
+                try
+                {
+                    var picker = new FileOpenPicker(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(App.CurrentApp.WindowHandle));
+                    picker.FileTypeFilter.Add(".zip");
+                    var selected = await picker.PickSingleFileAsync();
+                    if (selected is null) return;
+
+                    pendingWorldArchivePath = selected.Path;
+                    worldImportNameInput.Text = Path.GetFileNameWithoutExtension(selected.Path);
+                    worldImportNameInput.Visibility = Visibility.Visible;
+                    worldImportConfirmButton.Visibility = Visibility.Visible;
+                    worldArchiveStatus.Text = "备份会恢复为一个新世界；已有存档不会被覆盖。";
+                    worldArchiveStatus.Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"];
+                    worldArchiveStatus.Visibility = Visibility.Visible;
+                }
+                catch (Exception exception)
+                {
+                    worldArchiveStatus.Text = $"无法选择存档：{exception.Message}";
+                    worldArchiveStatus.Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SystemFillColorCriticalBrush"];
+                    worldArchiveStatus.Visibility = Visibility.Visible;
+                }
+            };
+            worldImportConfirmButton.Click += async (_, _) =>
+            {
+                if (string.IsNullOrWhiteSpace(pendingWorldArchivePath)) return;
+                worldImportConfirmButton.IsEnabled = false;
+                worldArchiveStatus.Text = "正在恢复世界备份…";
+                worldArchiveStatus.Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"];
+                worldArchiveStatus.Visibility = Visibility.Visible;
+                try
+                {
+                    var importedName = await ViewModel.ImportWorldBackupAsync(profileId, pendingWorldArchivePath, worldImportNameInput.Text);
+                    worlds = await ViewModel.ListMinecraftWorldsAsync(profileId);
+                    AddWorldRows();
+                    pendingWorldArchivePath = null;
+                    worldImportNameInput.Text = string.Empty;
+                    worldImportNameInput.Visibility = Visibility.Collapsed;
+                    worldImportConfirmButton.Visibility = Visibility.Collapsed;
+                    worldArchiveStatus.Text = $"世界“{importedName}”已恢复；原有存档没有被覆盖。";
+                    await App.CurrentApp.Logger.InformationAsync("world.backup_imported", $"A world backup was imported for instance {profile.Name}.");
+                }
+                catch (Exception exception)
+                {
+                    worldArchiveStatus.Text = $"恢复失败：{exception.Message}";
+                    worldArchiveStatus.Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SystemFillColorCriticalBrush"];
+                    await App.CurrentApp.Logger.ErrorAsync("world.backup_import_failed", "A Minecraft world backup could not be imported.", exception);
+                }
+                finally
+                {
+                    worldImportConfirmButton.IsEnabled = true;
+                }
+            };
+            var worldImportPanel = new StackPanel { Spacing = 8 };
+            worldImportPanel.Children.Add(worldImportButton);
+            worldImportPanel.Children.Add(worldImportNameInput);
+            worldImportPanel.Children.Add(worldImportConfirmButton);
+            worldImportPanel.Children.Add(worldArchiveStatus);
+            var worldContent = new StackPanel { Spacing = 10, Margin = new Thickness(0, 12, 0, 0) };
+            worldContent.Children.Add(worldImportPanel);
+            worldContent.Children.Add(worldList);
+
             var worldTab = new TabViewItem
             {
                 Header = "世界",
                 IsClosable = false,
-                Content = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = worldList, Padding = new Thickness(0, 12, 0, 0) }
+                Content = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = worldContent }
             };
             var serverForm = new StackPanel { Spacing = 8 };
             serverForm.Children.Add(serverNameInput);
