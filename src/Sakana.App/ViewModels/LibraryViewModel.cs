@@ -14,6 +14,9 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
     private GlobalLaunchSettings _globalLaunchSettings = GlobalLaunchSettings.Default;
     private string _searchQuery = string.Empty;
     private string? _groupFilter;
+    private string? _loaderFilter;
+    private string? _stateFilter;
+    private string _sortOrder = "created-desc";
 
     public LibraryViewModel(
         ILauncherService launcherService,
@@ -98,10 +101,18 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
         .Select(group => group!)
         .ToArray();
 
-    public void ApplyLibraryFilter(string? searchQuery, string? groupFilter)
+    public void ApplyLibraryFilter(
+        string? searchQuery,
+        string? groupFilter,
+        string? loaderFilter = null,
+        string? stateFilter = null,
+        string? sortOrder = null)
     {
         _searchQuery = searchQuery?.Trim() ?? string.Empty;
         _groupFilter = string.IsNullOrWhiteSpace(groupFilter) ? null : groupFilter;
+        _loaderFilter = string.IsNullOrWhiteSpace(loaderFilter) ? null : loaderFilter;
+        _stateFilter = string.IsNullOrWhiteSpace(stateFilter) ? null : stateFilter;
+        _sortOrder = sortOrder is "name-asc" or "name-desc" or "version-desc" ? sortOrder : "created-desc";
         RefreshVisibleProfiles();
     }
 
@@ -348,6 +359,7 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
         var profile = Profiles.FirstOrDefault(item => item.Id == profileId)
             ?? throw new KeyNotFoundException("The selected instance profile no longer exists.");
         profile.SetLaunching(true);
+        RefreshVisibleProfiles();
         try
         {
             var session = await _accountService.GetCurrentSessionAsync(LauncherSettings.MicrosoftOAuthClientId, cancellationToken);
@@ -368,6 +380,7 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
             {
                 profile.SetLaunching(false);
             }
+            RefreshVisibleProfiles();
         }
     }
 
@@ -384,8 +397,12 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
 
     private void OnInstallationProgressChanged(InstallationProgress progress)
     {
-        var profile = Profiles.FirstOrDefault(item => item.Id == progress.InstanceId);
-        profile?.ApplyProgress(progress);
+        _dispatcherQueue.TryEnqueue(() =>
+        {
+            var profile = Profiles.FirstOrDefault(item => item.Id == progress.InstanceId);
+            profile?.ApplyProgress(progress);
+            RefreshVisibleProfiles();
+        });
     }
 
     private void AddProfile(InstanceProfile profile)
@@ -397,7 +414,17 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
     private void RefreshVisibleProfiles()
     {
         VisibleProfiles.Clear();
-        foreach (var profile in Profiles.Where(profile => profile.MatchesFilter(_searchQuery, _groupFilter)))
+        var matches = Profiles.Where(profile => profile.MatchesFilter(_searchQuery, _groupFilter, _loaderFilter, _stateFilter));
+        var sorted = _sortOrder switch
+        {
+            "name-asc" => matches.OrderBy(profile => profile.Name, StringComparer.CurrentCultureIgnoreCase),
+            "name-desc" => matches.OrderByDescending(profile => profile.Name, StringComparer.CurrentCultureIgnoreCase),
+            "version-desc" => matches
+                .OrderByDescending(profile => profile.VersionId, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(profile => profile.Name, StringComparer.CurrentCultureIgnoreCase),
+            _ => matches.OrderByDescending(profile => profile.CreatedAtUtc)
+        };
+        foreach (var profile in sorted)
         {
             VisibleProfiles.Add(profile);
         }
@@ -414,6 +441,7 @@ public sealed class LibraryViewModel : ViewModelBase, IDisposable
             }
 
             profile.ApplyProcessStatus(status);
+            RefreshVisibleProfiles();
         });
     }
 

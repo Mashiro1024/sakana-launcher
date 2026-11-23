@@ -14,7 +14,7 @@ namespace Sakana.App.Pages;
 
 public sealed partial class LibraryPage : Page
 {
-    private bool _updatingGroupFilter;
+    private bool _updatingLibraryFilters;
 
     public LibraryPage() : this(App.CurrentApp.LauncherService, App.CurrentApp.MinecraftAccountService)
     {
@@ -119,13 +119,34 @@ public sealed partial class LibraryPage : Page
 
     private void LibrarySearch_TextChanged(object sender, TextChangedEventArgs e)
     {
+        if (_updatingLibraryFilters) return;
         ApplyLibraryFilter();
         UpdateLibraryListVisibility();
     }
 
-    private void GroupFilter_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void LibraryFilter_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_updatingGroupFilter) return;
+        if (_updatingLibraryFilters || !IsLoaded) return;
+        ApplyLibraryFilter();
+        UpdateLibraryListVisibility();
+    }
+
+    private void ClearLibraryFilters_Click(object sender, RoutedEventArgs e)
+    {
+        _updatingLibraryFilters = true;
+        try
+        {
+            LibrarySearchBox.Text = string.Empty;
+            GroupFilterComboBox.SelectedIndex = 0;
+            LoaderFilterComboBox.SelectedIndex = 0;
+            StateFilterComboBox.SelectedIndex = 0;
+            SortFilterComboBox.SelectedIndex = 0;
+        }
+        finally
+        {
+            _updatingLibraryFilters = false;
+        }
+
         ApplyLibraryFilter();
         UpdateLibraryListVisibility();
     }
@@ -133,13 +154,16 @@ public sealed partial class LibraryPage : Page
     private void ApplyLibraryFilter()
     {
         var selectedGroup = (GroupFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
-        ViewModel.ApplyLibraryFilter(LibrarySearchBox.Text, selectedGroup);
+        var loader = (LoaderFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        var state = (StateFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        var sort = (SortFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        ViewModel.ApplyLibraryFilter(LibrarySearchBox.Text, selectedGroup, loader, state, sort);
     }
 
     private void RefreshGroupFilterOptions(string? preferredGroup = null)
     {
         var currentGroup = preferredGroup ?? (GroupFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
-        _updatingGroupFilter = true;
+        _updatingLibraryFilters = true;
         try
         {
             GroupFilterComboBox.Items.Clear();
@@ -156,7 +180,7 @@ public sealed partial class LibraryPage : Page
         }
         finally
         {
-            _updatingGroupFilter = false;
+            _updatingLibraryFilters = false;
         }
     }
 
@@ -168,6 +192,9 @@ public sealed partial class LibraryPage : Page
         NoResultsState.Visibility = ViewModel.HasProfiles && ViewModel.VisibleProfiles.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;
+        LibraryCountText.Text = ViewModel.VisibleProfiles.Count == ViewModel.Profiles.Count
+            ? $"{ViewModel.Profiles.Count} 个实例"
+            : $"显示 {ViewModel.VisibleProfiles.Count} / {ViewModel.Profiles.Count} 个实例";
     }
 
     private async void OrganizeProfile_Click(object sender, RoutedEventArgs e)

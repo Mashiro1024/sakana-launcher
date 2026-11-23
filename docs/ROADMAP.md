@@ -68,6 +68,7 @@
 
 - [x] Add instance duplication, rename, and profile-specific game-directory controls.
 - [x] Add instance library search, groups, tags, and per-instance custom icons.
+- [x] Filter instances by loader and install/run state; sort by creation time, name, or Minecraft version, and clear filters in one action.
 - Back up and export/import full instances with clear save and account-data handling.
 - Add launch troubleshooting with Java, memory, missing dependencies, and crash-log guidance.
 - Add resource-pack and shader-pack compatibility checks and per-instance content toggles.
@@ -85,7 +86,7 @@ Use Prism's feature breadth as a coverage target while implementing Sakana's own
 
 | Area | Sakana today | Remaining parity work |
 | --- | --- | --- |
-| Instances | Isolated Vanilla/Fabric/Quilt/Forge/NeoForge instances, install/repair, per-instance memory, rename/duplicate, groups, tags, search, custom icons | Clone with content choices, multiple game roots, profile shortcuts |
+| Instances | Isolated Vanilla/Fabric/Quilt/Forge/NeoForge instances, install/repair, per-instance memory, rename/duplicate, groups, tags, search, loader/state filters, sorting, custom icons | Saved views, clone with content choices, multiple game roots, profile shortcuts |
 | Accounts and launch | Microsoft sign-in, ownership checks, launch/stop, output and history | Multiple accounts, account switching at launch, skin management, server/world quick launch |
 | Modpacks | Local `.mrpack` import, online Modrinth browsing/install, export, isolated update copies, and safe in-place updates with per-file conflict review | Recovery UI for a failed rollback, optional-file change review, save/world management |
 | Mods | Local file management plus sortable/paginated Modrinth compatible search/install and required dependencies for Fabric/Quilt/Forge/NeoForge | Update tracking, dependency status/change preview |
@@ -100,7 +101,7 @@ Use [Modrinth App](https://modrinth.com/app) as the main reference for browsing 
 
 1. **Worlds and servers:** per-instance world and server management with Quick Play is implemented; continue improving discovery and launch feedback.
 2. **Accounts and sharing:** support multiple Microsoft accounts, skins, and cross-instance synchronization/sharing.
-3. **Instance organization:** groups, tags, library search, and custom icons are implemented; continue with richer filtering and saved views.
+3. **Instance organization:** groups, tags, library search, loader/state filters, sorting, and custom icons are implemented; saved views remain.
 4. **Continue parity work:** complete Modrinth App and Prism workflows with Sakana's own WinUI 3 patterns; keep CurseForge excluded.
 
 ## Decisions recorded

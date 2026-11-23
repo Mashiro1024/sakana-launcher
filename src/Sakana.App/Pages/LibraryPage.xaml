@@ -22,13 +22,43 @@
             <InfoBar x:Name="RepairInfoBar" IsOpen="False" Severity="Success" IsClosable="True" />
             <InfoBar x:Name="ErrorInfoBar" IsOpen="False" Severity="Error" Title="操作失败" />
 
-            <Grid x:Name="OrganizationToolbar" ColumnSpacing="12" Visibility="Collapsed">
+            <Grid x:Name="OrganizationToolbar" ColumnSpacing="10" RowSpacing="8" Visibility="Collapsed">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="2*" />
                     <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBox x:Name="LibrarySearchBox" PlaceholderText="搜索实例名称、版本、分组或标签" TextChanged="LibrarySearch_TextChanged" />
-                <ComboBox x:Name="GroupFilterComboBox" Grid.Column="1" Header="分组" SelectionChanged="GroupFilter_SelectionChanged" />
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBox x:Name="LibrarySearchBox" PlaceholderText="搜索名称、版本、分组或标签" TextChanged="LibrarySearch_TextChanged" />
+                <ComboBox x:Name="GroupFilterComboBox" Grid.Column="1" Header="分组" MinWidth="150" SelectionChanged="LibraryFilter_SelectionChanged" />
+                <ComboBox x:Name="LoaderFilterComboBox" Grid.Column="2" Header="加载器" MinWidth="150" SelectedIndex="0" SelectionChanged="LibraryFilter_SelectionChanged">
+                    <ComboBoxItem Content="全部加载器" Tag="" />
+                    <ComboBoxItem Content="原版（Vanilla）" Tag="vanilla" />
+                    <ComboBoxItem Content="Fabric" Tag="fabric" />
+                    <ComboBoxItem Content="Quilt" Tag="quilt" />
+                    <ComboBoxItem Content="Forge" Tag="forge" />
+                    <ComboBoxItem Content="NeoForge" Tag="neoforge" />
+                </ComboBox>
+                <ComboBox x:Name="StateFilterComboBox" Grid.Column="3" Header="状态" MinWidth="150" SelectedIndex="0" SelectionChanged="LibraryFilter_SelectionChanged">
+                    <ComboBoxItem Content="全部状态" Tag="" />
+                    <ComboBoxItem Content="已安装" Tag="installed" />
+                    <ComboBoxItem Content="需要安装" Tag="uninstalled" />
+                    <ComboBoxItem Content="安装中" Tag="installing" />
+                    <ComboBoxItem Content="安装失败" Tag="failed" />
+                    <ComboBoxItem Content="运行中" Tag="running" />
+                </ComboBox>
+                <ComboBox x:Name="SortFilterComboBox" Grid.Row="1" Header="排序" MinWidth="190" SelectedIndex="0" SelectionChanged="LibraryFilter_SelectionChanged">
+                    <ComboBoxItem Content="创建时间（新到旧）" Tag="created-desc" />
+                    <ComboBoxItem Content="名称 A–Z" Tag="name-asc" />
+                    <ComboBoxItem Content="名称 Z–A" Tag="name-desc" />
+                    <ComboBoxItem Content="Minecraft 版本" Tag="version-desc" />
+                </ComboBox>
+                <TextBlock x:Name="LibraryCountText" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" VerticalAlignment="Bottom" Margin="4,0,0,8" Foreground="{ThemeResource SakanaMutedBrush}" />
+                <Button Grid.Row="1" Grid.Column="3" Content="清除筛选" Click="ClearLibraryFilters_Click" VerticalAlignment="Bottom" HorizontalAlignment="Right" />
             </Grid>
 
             <Border x:Name="EmptyState" Padding="28" CornerRadius="16" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1">
@@ -45,7 +75,7 @@
             <Border x:Name="NoResultsState" Padding="24" CornerRadius="14" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1" Visibility="Collapsed">
                 <StackPanel Spacing="6">
                     <TextBlock Text="没有匹配的实例" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
-                    <TextBlock Text="换个名称、版本、分组或标签试试。" FontSize="13" Foreground="{ThemeResource SakanaMutedBrush}" />
+                    <TextBlock Text="调整搜索内容或筛选条件，再试一次。" FontSize="13" Foreground="{ThemeResource SakanaMutedBrush}" />
                 </StackPanel>
             </Border>
 

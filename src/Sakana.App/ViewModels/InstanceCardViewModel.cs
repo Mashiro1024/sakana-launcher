@@ -36,6 +36,7 @@ public sealed class InstanceCardViewModel : ViewModelBase
     public bool SupportsModManagement => _profile.LoaderType is MinecraftLoaderType.Fabric or MinecraftLoaderType.Quilt or MinecraftLoaderType.Forge or MinecraftLoaderType.NeoForge;
     public string Name => _profile.Name;
     public string VersionId => _profile.VersionId;
+    public DateTimeOffset CreatedAtUtc => _profile.CreatedAtUtc;
     public string? GroupName => _profile.GroupName;
     public string? IconFileName => _profile.IconFileName;
     public IReadOnlyList<string> Tags => ParseTags(_profile.TagsJson);
@@ -201,13 +202,41 @@ public sealed class InstanceCardViewModel : ViewModelBase
         OnPropertyChanged(nameof(MemoryLabel));
     }
 
-    public bool MatchesFilter(string query, string? groupFilter)
+    public bool MatchesFilter(string query, string? groupFilter, string? loaderFilter, string? stateFilter)
     {
         if (!string.IsNullOrWhiteSpace(groupFilter) &&
             !string.Equals(_profile.GroupName, groupFilter, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
+
+        if (!string.IsNullOrWhiteSpace(loaderFilter))
+        {
+            var loaderName = _profile.LoaderType switch
+            {
+                MinecraftLoaderType.Vanilla => "vanilla",
+                MinecraftLoaderType.Fabric => "fabric",
+                MinecraftLoaderType.Quilt => "quilt",
+                MinecraftLoaderType.Forge => "forge",
+                MinecraftLoaderType.NeoForge => "neoforge",
+                _ => string.Empty
+            };
+            if (!string.Equals(loaderName, loaderFilter, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        var matchesState = stateFilter?.ToLowerInvariant() switch
+        {
+            "installed" => _profile.State == InstanceProfileState.Installed,
+            "uninstalled" => _profile.State is InstanceProfileState.ProfileOnly or InstanceProfileState.Cancelled,
+            "installing" => _profile.State == InstanceProfileState.Installing,
+            "failed" => _profile.State == InstanceProfileState.Failed,
+            "running" => _isRunning || _isLaunching,
+            _ => true
+        };
+        if (!matchesState) return false;
 
         if (string.IsNullOrWhiteSpace(query)) return true;
         return _profile.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
