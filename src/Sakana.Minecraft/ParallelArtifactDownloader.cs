@@ -16,10 +16,11 @@ internal sealed record InstallArtifact(
     IReadOnlyList<string>? AllowedHosts = null,
     bool IsContentAddressed = false);
 
-internal sealed class ParallelArtifactDownloader(HttpClient httpClient, int maxConcurrency = 8)
+internal sealed class ParallelArtifactDownloader(HttpClient httpClient, DownloadConcurrencyOptions? concurrencyOptions = null)
 {
     private const int BufferSize = 128 * 1024;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _pathLocks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly DownloadConcurrencyOptions _concurrencyOptions = concurrencyOptions ?? new DownloadConcurrencyOptions();
 
     public async Task DownloadAllAsync(
         Guid instanceId,
@@ -39,13 +40,12 @@ internal sealed class ParallelArtifactDownloader(HttpClient httpClient, int maxC
         var filesCompleted = 0;
         var lastReportedAt = 0L;
         var activeBytes = new ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        using var concurrencyGate = new SemaphoreSlim(maxConcurrency, maxConcurrency);
 
         ReportProgress(force: true, currentFile: null);
 
         var tasks = uniqueArtifacts.Select(async artifact =>
         {
-            await concurrencyGate.WaitAsync(cancellationToken);
+            using var concurrencyLease = await _concurrencyOptions.AcquireAsync(cancellationToken);
             SemaphoreSlim? pathGate = null;
             var pathGateAcquired = false;
             try
@@ -91,7 +91,6 @@ internal sealed class ParallelArtifactDownloader(HttpClient httpClient, int maxC
                 {
                     pathGate!.Release();
                 }
-                concurrencyGate.Release();
             }
         });
 

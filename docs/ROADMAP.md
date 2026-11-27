@@ -42,7 +42,7 @@
 - [x] Rename an instance from its library menu, preserving its files and launch history.
 - [x] Duplicate instances while retaining their isolated files and loader/pack metadata.
 - Export, import, and back up full instances.
-- Show available Java, system RAM, and recommended memory before launch; warn when a profile is likely to exceed physical memory.
+- [x] Warn before launch when a manually configured Java heap exceeds the recommendation derived from current free physical memory; show total/available RAM and Java selection context. Automatic allocation continues to use current free memory at launch.
 - Add snapshots and more version choices based on user demand.
 
 ### 3. Mod ecosystem
@@ -53,7 +53,7 @@
 - [x] Export installed instances as Modrinth `.mrpack`, including tracked Modrinth files and supported configuration/resource overrides.
 - [x] Link online Modrinth `.mrpack` instances to their project/version and preview added, changed, removed, and locally modified files before creating an isolated updated instance. The previous instance remains available as rollback.
 - [x] Update a linked Modrinth pack in place when Minecraft and loader versions match. New files are staged and verified, overwritten files are backed up for rollback, local conflicts default to preserved and require an explicit per-file choice to replace, and files removed from the pack remain in the instance.
-- CurseForge integration and downloads are permanently excluded by product decision.
+- [x] Add CurseForge modpack import and API-backed project/file lookup. When a file is unavailable for third-party distribution, continue installing available content and offer the official file page for manual download/import; do not bypass author controls.
 - [x] Add per-instance Fabric/Quilt/Forge/NeoForge mod management v1: inspect loader metadata, import `.jar` files, enable/disable, and remove without changing another instance.
 - [x] Add Modrinth mod search, Minecraft/loader-compatible version selection, SHA-1/SHA-512 download validation, and required-dependency installation for Fabric/Quilt/Forge/NeoForge.
 - Add provider-aware installed-version tracking, update checks, dependency change previews, and dependency status in the mod list.
@@ -87,23 +87,23 @@ Use Prism's feature breadth as a coverage target while implementing Sakana's own
 
 | Area | Sakana today | Remaining parity work |
 | --- | --- | --- |
-| Instances | Isolated Vanilla/Fabric/Quilt/Forge/NeoForge instances, install/repair, per-instance memory, rename/duplicate, groups, tags, search, loader/state filters, sorting, custom icons | Saved views, clone with content choices, multiple game roots, profile shortcuts |
-| Accounts and launch | Microsoft sign-in, ownership checks, launch/stop, output and history, server/world Quick Play | Multiple accounts, account switching at launch, skin management |
+| Instances | Isolated Vanilla/Fabric/Quilt/Forge/NeoForge instances, install/repair, per-instance memory, rename/duplicate, groups, tags, search, loader/state filters, sorting, custom icons, saved filter views | Clone with content choices, multiple game roots, profile shortcuts |
+| Accounts and launch | Microsoft sign-in, ownership checks, multiple saved accounts, account switching at launch, launch/stop, output and history, server/world Quick Play; full-body front/back skin preview with outer-layer control and official skin-management handoff | In-launcher skin upload/customization, cross-instance account/profile sharing |
 | Modpacks | Local `.mrpack` import, online Modrinth browsing/install, export, isolated update copies, safe in-place updates with per-file conflict review, and per-world ZIP backup/restore | Recovery UI for a failed rollback, optional-file change review, deeper save/world management |
 | Mods | Local file management plus sortable/paginated Modrinth compatible search/install and required dependencies for Fabric/Quilt/Forge/NeoForge | Update tracking, dependency status/change preview |
 | Other content | Online Modrinth resource/shader search; per-instance install, enable, disable, and remove; world-scoped data packs; per-instance world/server lists and Quick Play | Deeper save management, screenshots, content updates, and saved customization setups |
 | Java and launch options | System Java detection, on-demand Mojang runtime download, global/per-instance memory, Java, JVM args, environment, and window options | More Java versions, pre/post-launch commands, deeper diagnostics |
 | Diagnostics and shell | Installation progress, live process output, history, logs | Searchable log/crash views, system diagnostics, command-line launch/import, protocol links, desktop shortcuts |
-| Launcher settings | Theme, global launch defaults, Java detection, Sakana data root | Proxies, download mirrors, folder settings, auto-updates, backup/migration tools |
+| Launcher settings | Theme, global launch defaults, Java detection, Sakana data root, copy launch settings between instances and `.sakanlaunch` templates | Proxies, download mirrors, folder settings, auto-updates, backup/migration tools |
 
 Use [Modrinth App](https://modrinth.com/app) as the main reference for browsing and installing modpacks and content in one workspace. Keep Prism's feature coverage as a parity target, with HMCL and PCL2 as references for selected Chinese-language workflows. The UI and data model remain Sakana's own.
 
 ## Product priority from user direction
 
-1. **Worlds and servers:** per-instance world and server management, Quick Play, and individual world ZIP backup/restore are implemented; continue improving discovery and launch feedback.
-2. **Accounts and sharing:** support multiple Microsoft accounts, skins, and cross-instance synchronization/sharing.
-3. **Instance organization:** groups, tags, library search, loader/state filters, sorting, and custom icons are implemented; saved views remain.
-4. **Continue parity work:** complete Modrinth App and Prism workflows with Sakana's own WinUI 3 patterns; keep CurseForge excluded.
+1. **Worlds and servers:** per-instance world and server lists, Quick Play, and individual world ZIP backup/restore are implemented; continue improving save management, discovery, and launch feedback.
+2. **Accounts and sharing:** multiple Microsoft accounts and a full-body skin preview are implemented; next add in-launcher skin customization and cross-instance account/profile sharing.
+3. **Instance organization:** groups, tags, library search, loader/state filters, sorting, and custom icons are implemented; continue with saved-view management and profile shortcuts.
+4. **Continue parity work:** complete Modrinth App and Prism workflows with Sakana's own WinUI 3 patterns; CurseForge import and API-backed access are supported subject to approval and author distribution settings.
 
 ## Decisions recorded
 
@@ -116,6 +116,7 @@ Use [Modrinth App](https://modrinth.com/app) as the main reference for browsing 
 | Data | Sakana-owned root and SQLite metadata | Portability/cloud sync becomes a requirement |
 | First engine target | Vanilla | Core install/launch is reliable |
 | Mod ecosystem | Loader adapters + pack-format readers + provider interfaces | Each integration is reviewed for compatibility and provider terms |
+| CurseForge access | User-provided, CurseForge-approved API Key; preserve author distribution controls and provide official-page/manual-import fallback | Revisit if CurseForge changes its API or third-party distribution terms |
 | Distribution | Prototype packaged; public channel undecided | Before public beta |
 
 ## Deferred choices

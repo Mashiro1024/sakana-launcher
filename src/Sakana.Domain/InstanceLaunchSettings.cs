@@ -10,4 +10,5 @@ public sealed record InstanceLaunchSettings(
     bool Fullscreen,
     int WindowWidth,
     int WindowHeight,
-    bool UseGlobalSettings = false);
+    bool UseGlobalSettings = false,
+    string? MinecraftAccountUuid = null);

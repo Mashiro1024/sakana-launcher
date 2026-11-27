@@ -25,6 +25,13 @@ public sealed class MinecraftLaunchPlanner : IMinecraftLaunchPlanner
         _javaRuntimeManager = javaRuntimeManager;
     }
 
+    public async Task<bool> SupportsQuickPlayAsync(string minecraftVersionId, CancellationToken cancellationToken = default)
+    {
+        var safeVersionId = ValidateSegment(minecraftVersionId, "Minecraft version ID");
+        var (metadata, _) = await _metadataClient.GetVersionMetadataAsync(safeVersionId, cancellationToken);
+        return SupportsQuickPlay(metadata.Arguments?.Game ?? default);
+    }
+
     public async Task<MinecraftLaunchPlan> CreatePlanAsync(
         InstanceProfile profile,
         MinecraftAccountSession session,
@@ -45,7 +52,7 @@ public sealed class MinecraftLaunchPlanner : IMinecraftLaunchPlanner
         var supportsQuickPlay = SupportsQuickPlay(metadata.Arguments?.Game ?? default);
         if (quickPlayTarget is not null && !supportsQuickPlay)
         {
-            throw new NotSupportedException($"Minecraft {safeVersionId} does not advertise the official Quick Play launch arguments. Start the game normally and choose the world or server in Minecraft.");
+            throw new MinecraftQuickPlayNotSupportedException(safeVersionId);
         }
 
         quickPlayTarget = ValidateQuickPlayTarget(quickPlayTarget);

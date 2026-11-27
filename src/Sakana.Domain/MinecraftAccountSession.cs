@@ -13,7 +13,9 @@ public sealed class MinecraftAccountSession(
     string? xuid = null,
     string userPropertiesJson = "{}",
     bool isDemoUser = false,
-    string? legacySessionId = null)
+    string? legacySessionId = null,
+    string? skinTextureUrl = null,
+    string? skinVariant = null)
 {
     public string PlayerName { get; } = playerName;
     public string PlayerUuid { get; } = playerUuid;
@@ -24,6 +26,8 @@ public sealed class MinecraftAccountSession(
     public string UserPropertiesJson { get; } = userPropertiesJson;
     public bool IsDemoUser { get; } = isDemoUser;
     public string? LegacySessionId { get; } = legacySessionId;
+    public string? SkinTextureUrl { get; } = skinTextureUrl;
+    public string? SkinVariant { get; } = skinVariant;
 
     public override string ToString() => $"MinecraftAccountSession(PlayerName={PlayerName}, PlayerUuid={PlayerUuid}, AccessToken=[redacted])";
 }

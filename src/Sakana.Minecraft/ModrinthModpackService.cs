@@ -8,7 +8,7 @@ using Sakana.Domain;
 
 namespace Sakana.Minecraft;
 
-public sealed class ModrinthModpackService(HttpClient httpClient) : IModrinthModpackService
+public sealed class ModrinthModpackService(HttpClient httpClient, DownloadConcurrencyOptions? downloadConcurrencyOptions = null) : IModrinthModpackService
 {
     private const string ManifestPath = "modrinth.index.json";
     private const long MaximumArchiveBytes = 4L * 1024 * 1024 * 1024;
@@ -28,7 +28,7 @@ public sealed class ModrinthModpackService(HttpClient httpClient) : IModrinthMod
         PropertyNameCaseInsensitive = true
     };
 
-    private readonly ParallelArtifactDownloader _downloader = new(httpClient);
+    private readonly ParallelArtifactDownloader _downloader = new(httpClient, downloadConcurrencyOptions);
 
     public async Task<ModrinthModpackDescription> InspectAsync(string archivePath, CancellationToken cancellationToken = default)
     {

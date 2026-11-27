@@ -16,11 +16,14 @@ Current development includes:
 - Importing and exporting Modrinth `.mrpack` files, browsing Modrinth modpacks, and reviewing or applying linked pack updates.
 - Searching for compatible Modrinth mods, resource packs, shaders, and data packs, plus local content management.
 - Managing per-instance worlds and server shortcuts, including Quick Play and safe per-world ZIP backup/restore.
+- Viewing game logs and screenshots from dedicated launcher pages.
+- Managing multiple Microsoft accounts and previewing the active account's full-body skin from the front or back.
 - Organizing instances with groups, tags, search, and per-instance custom icons.
 - Global and per-instance Java, memory, JVM argument, environment variable, and game-window settings.
+- Configuring bounded parallel downloads from launcher settings.
 - Microsoft device-code sign-in flow and Minecraft account checks.
 
-Forge and NeoForge still need end-to-end installation and launch verification. The Microsoft login application is awaiting Minecraft Services authorization; until that is approved, Minecraft account verification and launching may be unavailable. CurseForge integration and downloads are out of scope.
+Forge and NeoForge still need end-to-end installation and launch verification. Minecraft account verification requires a Microsoft app registration authorized for Minecraft Services. CurseForge modpack ZIP import is supported. CurseForge API downloads require an approved API key, and files that are not available for third-party distribution are left to the user to download from their official CurseForge pages and import into an instance. Sakana does not bypass author distribution settings or mirror CurseForge files. This project is developed with substantial assistance from AI tools.
 
 See the [roadmap](docs/ROADMAP.md) for current implementation status and planned work.
 

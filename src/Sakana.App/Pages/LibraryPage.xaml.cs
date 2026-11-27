@@ -1,6 +1,8 @@
 using Sakana.Application;
+using Sakana.App.Services;
 using Sakana.App.ViewModels;
 using Sakana.Domain;
+using System.Text.Json;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -15,6 +17,9 @@ namespace Sakana.App.Pages;
 public sealed partial class LibraryPage : Page
 {
     private bool _updatingLibraryFilters;
+    private IReadOnlyList<LibraryViewPreset> _savedLibraryViews = [];
+    private UiPreferences _uiPreferences = new();
+    private bool _isGridView = true;
 
     public LibraryPage() : this(App.CurrentApp.LauncherService, App.CurrentApp.MinecraftAccountService)
     {
@@ -32,10 +37,17 @@ public sealed partial class LibraryPage : Page
 
     private async void Page_Loaded(object sender, RoutedEventArgs e)
     {
+        _uiPreferences = UiPreferencesStore.Load(ViewModel.DataDirectory);
+        _isGridView = !string.Equals(_uiPreferences.LibraryViewMode, "list", StringComparison.OrdinalIgnoreCase);
+        PreviewInfoBar.IsOpen = !_uiPreferences.LibraryGuideDismissed;
+        ShowGuideButton.Visibility = _uiPreferences.LibraryGuideDismissed ? Visibility.Visible : Visibility.Collapsed;
+        ApplyViewMode();
+
         try
         {
             await ViewModel.RefreshAsync();
             RefreshGroupFilterOptions();
+            await RefreshSavedLibraryViewsAsync();
             ApplyLibraryFilter();
             UpdateLibraryListVisibility();
         }
@@ -65,16 +77,23 @@ public sealed partial class LibraryPage : Page
         }
 
         var menu = new MenuFlyout();
-        MenuFlyoutItem AddItem(string label, RoutedEventHandler handler, bool isEnabled = true)
+        MenuFlyoutItem AddItem(string label, RoutedEventHandler handler, bool isEnabled = true, MenuFlyoutSubItem? parent = null)
         {
             var item = new MenuFlyoutItem { Text = label, Tag = profileId, IsEnabled = isEnabled };
             item.Click += handler;
-            menu.Items.Add(item);
+            if (parent is null)
+            {
+                menu.Items.Add(item);
+            }
+            else
+            {
+                parent.Items.Add(item);
+            }
+
             return item;
         }
 
         var busy = profile.IsRunning || profile.IsLaunching || profile.ProfileState == InstanceProfileState.Installing;
-        AddItem("分组、标签与图标…", OrganizeProfile_Click, !busy);
         if (profile.ProfileState == InstanceProfileState.Installing)
         {
             AddItem("取消安装", CancelInstall_Click);
@@ -85,41 +104,180 @@ public sealed partial class LibraryPage : Page
         }
         else if (profile.ProfileState == InstanceProfileState.Installed)
         {
-            AddItem("世界与服务器…", ManageWorldsAndServers_Click, !busy);
-            AddItem("校验 / 修复", RepairProfile_Click, !busy);
-            AddItem("导出 Modrinth 整合包…", ExportModrinthPack_Click, !busy);
+            var contentMenu = new MenuFlyoutSubItem { Text = "世界与内容" };
+            AddItem("世界与服务器…", ManageWorldsAndServers_Click, !busy, contentMenu);
             if (!string.IsNullOrWhiteSpace(profile.ModrinthProjectId))
             {
-                AddItem("检查 Modrinth 更新…", UpdateModrinthPack_Click, !busy);
+                AddItem("检查 Modrinth 更新…", UpdateModrinthPack_Click, !busy, contentMenu);
             }
 
-            menu.Items.Add(new MenuFlyoutSeparator());
             if (profile.SupportsModManagement)
             {
-                AddItem("模组", ManageMods_Click, !busy);
+                AddItem("模组", ManageMods_Click, !busy, contentMenu);
             }
 
-            AddItem("内容包管理", ManagePacks_Click, !busy);
-            menu.Items.Add(new MenuFlyoutSeparator());
-            AddItem("启动设置", LaunchSettings_Click, !busy);
+            AddItem("内容包管理", ManagePacks_Click, !busy, contentMenu);
+            contentMenu.IsEnabled = !busy;
+            menu.Items.Add(contentMenu);
+
+            var quickLaunchMenu = new MenuFlyoutSubItem { Text = "快速启动" };
+            quickLaunchMenu.Items.Add(new MenuFlyoutItem { Text = "正在读取快捷目标…", IsEnabled = false });
+            quickLaunchMenu.IsEnabled = !busy;
+            menu.Items.Insert(0, quickLaunchMenu);
+            if (!busy)
+            {
+                _ = PopulateQuickLaunchMenuAsync(quickLaunchMenu, profileId);
+            }
+
+            var settingsMenu = new MenuFlyoutSubItem { Text = "实例设置" };
+            AddItem("启动设置…", LaunchSettings_Click, !busy, settingsMenu);
+            AddItem("分组、标签与图标…", OrganizeProfile_Click, !busy, settingsMenu);
+            settingsMenu.IsEnabled = !busy;
+            menu.Items.Add(settingsMenu);
+
+            var maintenanceMenu = new MenuFlyoutSubItem { Text = "维护与导出" };
+            AddItem("校验 / 修复", RepairProfile_Click, !busy, maintenanceMenu);
+            AddItem("导出 Modrinth 整合包…", ExportModrinthPack_Click, !busy, maintenanceMenu);
+            maintenanceMenu.IsEnabled = !busy;
+            menu.Items.Add(maintenanceMenu);
+        }
+        else
+        {
+            var settingsMenu = new MenuFlyoutSubItem { Text = "实例设置" };
+            AddItem("分组、标签与图标…", OrganizeProfile_Click, !busy, settingsMenu);
+            settingsMenu.IsEnabled = !busy;
+            menu.Items.Add(settingsMenu);
         }
 
         menu.Items.Add(new MenuFlyoutSeparator());
         AddItem("打开实例文件夹", OpenInstanceFolder_Click);
-        AddItem("复制实例…", DuplicateProfile_Click, !busy);
-        AddItem("重命名实例…", RenameProfile_Click, !busy);
-        var deleteItem = AddItem("删除实例和文件…", DeleteProfile_Click, !busy);
+        var profileMenu = new MenuFlyoutSubItem { Text = "管理实例" };
+        AddItem("复制实例…", DuplicateProfile_Click, !busy, profileMenu);
+        AddItem("重命名实例…", RenameProfile_Click, !busy, profileMenu);
+        var deleteItem = AddItem("删除实例和文件…", DeleteProfile_Click, !busy, profileMenu);
         if (busy)
         {
             ToolTipService.SetToolTip(deleteItem, "请先取消安装或停止游戏，再删除实例。");
         }
 
+        menu.Items.Add(profileMenu);
+
         menu.ShowAt(button);
     }
 
-    private void LibrarySearch_TextChanged(object sender, TextChangedEventArgs e)
+    private async Task PopulateQuickLaunchMenuAsync(MenuFlyoutSubItem quickLaunchMenu, Guid profileId)
+    {
+        try
+        {
+            var worlds = await ViewModel.ListMinecraftWorldsAsync(profileId);
+            var pinnedServers = (await ViewModel.ListServerBookmarksAsync(profileId))
+                .Where(server => server.IsPinned)
+                .ToArray();
+
+            quickLaunchMenu.Items.Clear();
+            var addedTarget = false;
+            foreach (var worldName in worlds.Take(8))
+            {
+                var item = new MenuFlyoutItem { Text = $"世界 · {worldName}" };
+                item.Click += async (_, _) => await LaunchProfileWithQuickPlayAsync(
+                    profileId,
+                    new MinecraftQuickPlayTarget(MinecraftQuickPlayKind.SingleplayerWorld, worldName));
+                quickLaunchMenu.Items.Add(item);
+                addedTarget = true;
+            }
+
+            foreach (var server in pinnedServers.Take(8))
+            {
+                var item = new MenuFlyoutItem { Text = $"服务器 · {server.Name}" };
+                item.Click += async (_, _) => await LaunchProfileWithQuickPlayAsync(
+                    profileId,
+                    new MinecraftQuickPlayTarget(MinecraftQuickPlayKind.MultiplayerServer, server.Address));
+                quickLaunchMenu.Items.Add(item);
+                addedTarget = true;
+            }
+
+            if (addedTarget)
+            {
+                quickLaunchMenu.Items.Add(new MenuFlyoutSeparator());
+            }
+            else
+            {
+                quickLaunchMenu.Items.Add(new MenuFlyoutItem { Text = "暂无快捷目标", IsEnabled = false });
+                quickLaunchMenu.Items.Add(new MenuFlyoutSeparator());
+            }
+
+            var manageItem = new MenuFlyoutItem { Text = "管理世界与服务器…", Tag = profileId };
+            manageItem.Click += ManageWorldsAndServers_Click;
+            quickLaunchMenu.Items.Add(manageItem);
+        }
+        catch (Exception exception)
+        {
+            quickLaunchMenu.Items.Clear();
+            quickLaunchMenu.Items.Add(new MenuFlyoutItem { Text = "快捷目标读取失败", IsEnabled = false });
+            var retryItem = new MenuFlyoutItem { Text = "打开世界与服务器管理…", Tag = profileId };
+            retryItem.Click += ManageWorldsAndServers_Click;
+            quickLaunchMenu.Items.Add(retryItem);
+            await App.CurrentApp.Logger.ErrorAsync("quick_play.targets_load_failed", "Could not load the quick launch targets for an instance.", exception);
+        }
+    }
+
+    private void PreviewInfoBar_CloseButtonClick(InfoBar sender, object args)
+    {
+        _uiPreferences = _uiPreferences with { LibraryGuideDismissed = true };
+        UiPreferencesStore.Save(ViewModel.DataDirectory, _uiPreferences);
+        ShowGuideButton.Visibility = Visibility.Visible;
+    }
+
+    private void ShowGuideButton_Click(object sender, RoutedEventArgs e)
+    {
+        PreviewInfoBar.IsOpen = true;
+        _uiPreferences = _uiPreferences with { LibraryGuideDismissed = false };
+        UiPreferencesStore.Save(ViewModel.DataDirectory, _uiPreferences);
+        ShowGuideButton.Visibility = Visibility.Collapsed;
+    }
+
+    private void GridViewButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_isGridView)
+        {
+            _isGridView = true;
+            ApplyViewMode();
+            _uiPreferences = _uiPreferences with { LibraryViewMode = "grid" };
+            UiPreferencesStore.Save(ViewModel.DataDirectory, _uiPreferences);
+        }
+        else
+        {
+            GridViewButton.IsChecked = true;
+        }
+    }
+
+    private void ListViewButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isGridView)
+        {
+            _isGridView = false;
+            ApplyViewMode();
+            _uiPreferences = _uiPreferences with { LibraryViewMode = "list" };
+            UiPreferencesStore.Save(ViewModel.DataDirectory, _uiPreferences);
+        }
+        else
+        {
+            ListViewButton.IsChecked = true;
+        }
+    }
+
+    private void ApplyViewMode()
+    {
+        GridViewButton.IsChecked = _isGridView;
+        ListViewButton.IsChecked = !_isGridView;
+        ProfileItems.Layout = (Layout)Resources[_isGridView ? "GridInstancesLayout" : "ListInstancesLayout"];
+        ProfileItems.ItemTemplate = (DataTemplate)Resources[_isGridView ? "GridInstanceTemplate" : "ListInstanceTemplate"];
+    }
+
+    private void LibrarySearch_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
     {
         if (_updatingLibraryFilters) return;
+        ClearSavedLibraryViewSelection();
         ApplyLibraryFilter();
         UpdateLibraryListVisibility();
     }
@@ -127,17 +285,20 @@ public sealed partial class LibraryPage : Page
     private void LibraryFilter_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_updatingLibraryFilters || !IsLoaded) return;
+        ClearSavedLibraryViewSelection();
         ApplyLibraryFilter();
         UpdateLibraryListVisibility();
     }
 
     private void ClearLibraryFilters_Click(object sender, RoutedEventArgs e)
     {
+        ClearSavedLibraryViewSelection();
         _updatingLibraryFilters = true;
         try
         {
             LibrarySearchBox.Text = string.Empty;
             GroupFilterComboBox.SelectedIndex = 0;
+            TagFilterComboBox.SelectedIndex = 0;
             LoaderFilterComboBox.SelectedIndex = 0;
             StateFilterComboBox.SelectedIndex = 0;
             SortFilterComboBox.SelectedIndex = 0;
@@ -154,15 +315,183 @@ public sealed partial class LibraryPage : Page
     private void ApplyLibraryFilter()
     {
         var selectedGroup = (GroupFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
-        var loader = (LoaderFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        var selectedTag = (TagFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
         var state = (StateFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
         var sort = (SortFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
-        ViewModel.ApplyLibraryFilter(LibrarySearchBox.Text, selectedGroup, loader, state, sort);
+        var loader = (LoaderFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        ViewModel.ApplyLibraryFilter(LibrarySearchBox.Text, selectedGroup, loader, state, sort, selectedTag);
+
+        var flyoutFilterCount = 0;
+        if (!string.IsNullOrWhiteSpace(selectedGroup)) flyoutFilterCount++;
+        if (!string.IsNullOrWhiteSpace(state)) flyoutFilterCount++;
+        if (!string.IsNullOrWhiteSpace(selectedTag)) flyoutFilterCount++;
+        if (!string.IsNullOrWhiteSpace(sort) && !string.Equals(sort, "created-desc", StringComparison.OrdinalIgnoreCase)) flyoutFilterCount++;
+
+        ActiveFilterBadge.Value = flyoutFilterCount;
+        ActiveFilterBadge.Visibility = flyoutFilterCount > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        var hasAnyFilter = flyoutFilterCount > 0
+            || !string.IsNullOrWhiteSpace(LibrarySearchBox.Text)
+            || !string.IsNullOrWhiteSpace(loader);
+        ClearFiltersButton.Visibility = hasAnyFilter ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async Task RefreshSavedLibraryViewsAsync(string? preferredName = null)
+    {
+        _savedLibraryViews = await ViewModel.GetLibraryViewPresetsAsync();
+        _updatingLibraryFilters = true;
+        try
+        {
+            SavedLibraryViewComboBox.Items.Clear();
+            SavedLibraryViewComboBox.Items.Add(new ComboBoxItem { Content = "选择已保存的视图" });
+            foreach (var preset in _savedLibraryViews.OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase))
+            {
+                SavedLibraryViewComboBox.Items.Add(new ComboBoxItem { Content = preset.Name, Tag = preset });
+            }
+
+            var selected = string.IsNullOrWhiteSpace(preferredName)
+                ? null
+                : SavedLibraryViewComboBox.Items.OfType<ComboBoxItem>()
+                    .FirstOrDefault(item => item.Tag is LibraryViewPreset preset && string.Equals(preset.Name, preferredName, StringComparison.OrdinalIgnoreCase));
+            SavedLibraryViewComboBox.SelectedItem = selected ?? SavedLibraryViewComboBox.Items[0];
+        }
+        finally
+        {
+            _updatingLibraryFilters = false;
+        }
+    }
+
+    private void SavedLibraryView_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_updatingLibraryFilters || !IsLoaded || SavedLibraryViewComboBox.SelectedItem is not ComboBoxItem { Tag: LibraryViewPreset preset }) return;
+
+        _updatingLibraryFilters = true;
+        try
+        {
+            LibrarySearchBox.Text = preset.SearchQuery;
+            SelectFilterItem(GroupFilterComboBox, preset.Group);
+            SelectFilterItem(TagFilterComboBox, preset.Tag);
+            SelectFilterItem(LoaderFilterComboBox, preset.Loader);
+            SelectFilterItem(StateFilterComboBox, preset.State);
+            SelectFilterItem(SortFilterComboBox, preset.SortOrder);
+        }
+        finally
+        {
+            _updatingLibraryFilters = false;
+        }
+
+        ApplyLibraryFilter();
+        UpdateLibraryListVisibility();
+    }
+
+    private static void SelectFilterItem(ComboBox comboBox, string? tag)
+    {
+        comboBox.SelectedItem = comboBox.Items
+            .OfType<ComboBoxItem>()
+            .FirstOrDefault(item => string.Equals(item.Tag as string, tag, StringComparison.OrdinalIgnoreCase))
+            ?? comboBox.Items.OfType<ComboBoxItem>().FirstOrDefault();
+    }
+
+    private void ClearSavedLibraryViewSelection()
+    {
+        if (SavedLibraryViewComboBox.SelectedIndex <= 0) return;
+        _updatingLibraryFilters = true;
+        SavedLibraryViewComboBox.SelectedIndex = 0;
+        _updatingLibraryFilters = false;
+    }
+
+    private async void SaveCurrentLibraryView_Click(object sender, RoutedEventArgs e)
+    {
+        var nameInput = new TextBox { Header = "视图名称", PlaceholderText = "例如：Fabric 生存实例", MaxLength = 50 };
+        var dialog = new ContentDialog
+        {
+            Title = "保存当前实例视图",
+            Content = nameInput,
+            PrimaryButtonText = "保存",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = XamlRoot
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+
+        var name = nameInput.Text.Trim();
+        if (name.Length == 0)
+        {
+            ShowError("需要视图名称", "请输入一个名称后再保存。", "实例视图名称不能为空。");
+            return;
+        }
+
+        try
+        {
+            var preset = new LibraryViewPreset(
+                name,
+                LibrarySearchBox.Text.Trim(),
+                (GroupFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string,
+                (TagFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string,
+                (LoaderFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string,
+                (StateFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string,
+                (SortFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "created-desc");
+            var presets = _savedLibraryViews
+                .Where(item => !string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase))
+                .Append(preset)
+                .ToArray();
+            await ViewModel.SaveLibraryViewPresetsAsync(presets);
+            await RefreshSavedLibraryViewsAsync(name);
+            RepairInfoBar.Severity = InfoBarSeverity.Success;
+            RepairInfoBar.Title = "视图已保存";
+            RepairInfoBar.Message = $"“{name}”已保存，可从实例库的视图列表快速切换。";
+            RepairInfoBar.IsOpen = true;
+        }
+        catch (Exception exception)
+        {
+            await App.CurrentApp.Logger.ErrorAsync("library.view_preset_save_failed", "Could not save the instance library view.", exception);
+            ShowError("无法保存视图", "请检查名称或查看 Sakana 日志。", exception.Message);
+        }
+    }
+
+    private async void DeleteSavedLibraryView_Click(object sender, RoutedEventArgs e)
+    {
+        if (SavedLibraryViewComboBox.SelectedItem is not ComboBoxItem { Tag: LibraryViewPreset preset })
+        {
+            RepairInfoBar.Severity = InfoBarSeverity.Informational;
+            RepairInfoBar.Title = "尚未选择视图";
+            RepairInfoBar.Message = "先从“已保存的视图”列表中选择一个项目。";
+            RepairInfoBar.IsOpen = true;
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = $"删除视图“{preset.Name}”？",
+            Content = "只会删除这组已保存的筛选条件，不会删除任何实例。",
+            PrimaryButtonText = "删除视图",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+
+        try
+        {
+            var presets = _savedLibraryViews.Where(item => !string.Equals(item.Name, preset.Name, StringComparison.OrdinalIgnoreCase)).ToArray();
+            await ViewModel.SaveLibraryViewPresetsAsync(presets);
+            await RefreshSavedLibraryViewsAsync();
+            RepairInfoBar.Severity = InfoBarSeverity.Success;
+            RepairInfoBar.Title = "视图已删除";
+            RepairInfoBar.Message = $"已删除“{preset.Name}”。实例和文件没有改动。";
+            RepairInfoBar.IsOpen = true;
+        }
+        catch (Exception exception)
+        {
+            await App.CurrentApp.Logger.ErrorAsync("library.view_preset_delete_failed", "Could not remove the instance library view.", exception);
+            ShowError("无法删除视图", "请查看 Sakana 日志。", exception.Message);
+        }
     }
 
     private void RefreshGroupFilterOptions(string? preferredGroup = null)
     {
         var currentGroup = preferredGroup ?? (GroupFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        var currentTag = (TagFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string;
         _updatingLibraryFilters = true;
         try
         {
@@ -177,6 +506,18 @@ public sealed partial class LibraryPage : Page
                 .OfType<ComboBoxItem>()
                 .FirstOrDefault(item => string.Equals(item.Tag as string, currentGroup, StringComparison.OrdinalIgnoreCase));
             GroupFilterComboBox.SelectedItem = match ?? GroupFilterComboBox.Items[0];
+
+            TagFilterComboBox.Items.Clear();
+            TagFilterComboBox.Items.Add(new ComboBoxItem { Content = "全部标签", Tag = null });
+            foreach (var tag in ViewModel.GetTagNames())
+            {
+                TagFilterComboBox.Items.Add(new ComboBoxItem { Content = tag, Tag = tag });
+            }
+
+            var tagMatch = TagFilterComboBox.Items
+                .OfType<ComboBoxItem>()
+                .FirstOrDefault(item => string.Equals(item.Tag as string, currentTag, StringComparison.OrdinalIgnoreCase));
+            TagFilterComboBox.SelectedItem = tagMatch ?? TagFilterComboBox.Items[0];
         }
         finally
         {
@@ -345,8 +686,22 @@ public sealed partial class LibraryPage : Page
             };
             var worldImportConfirmButton = new Button { Content = "导入世界", Visibility = Visibility.Collapsed };
             string? pendingWorldArchivePath = null;
+            Guid? editingServerId = null;
             var serverNameInput = new TextBox { Header = "收藏名称", PlaceholderText = "例如：生存服", MaxLength = 80 };
             var serverAddressInput = new TextBox { Header = "服务器地址", PlaceholderText = "play.example.net:25565", MaxLength = 255 };
+            var serverSearchInput = new TextBox { PlaceholderText = "搜索服务器名称或地址", MaxLength = 100 };
+            var serverCountText = new TextBlock
+            {
+                FontSize = 12,
+                Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"]
+            };
+            var serverStatusRefreshButton = new Button { Content = "刷新状态" };
+            var serverStatuses = new Dictionary<Guid, MinecraftServerStatus>();
+            var serverStatusLabels = new Dictionary<Guid, TextBlock>();
+            var serverStatusCheckInProgress = false;
+            var serverStatusRefreshRequested = false;
+            using var serverStatusCancellation = new CancellationTokenSource();
+            var cancelServerEditButton = new Button { Content = "取消编辑", Visibility = Visibility.Collapsed, HorizontalAlignment = HorizontalAlignment.Left };
             var serverError = new TextBlock { Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SystemFillColorCriticalBrush"], TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
 
             var dialog = new ContentDialog
@@ -441,6 +796,17 @@ public sealed partial class LibraryPage : Page
             void AddServerRows()
             {
                 serverList.Children.Clear();
+                serverStatusLabels.Clear();
+                var query = serverSearchInput.Text.Trim();
+                var visibleServers = servers
+                    .Where(server => query.Length == 0 ||
+                        server.Name.Contains(query, StringComparison.CurrentCultureIgnoreCase) ||
+                        server.Address.Contains(query, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                serverCountText.Text = query.Length == 0
+                    ? $"已收藏 {servers.Count} 个服务器"
+                    : $"显示 {visibleServers.Length} / {servers.Count} 个服务器";
+                serverSearchInput.IsEnabled = servers.Count > 0;
                 if (servers.Count == 0)
                 {
                     serverList.Children.Add(new TextBlock
@@ -452,29 +818,58 @@ public sealed partial class LibraryPage : Page
                     return;
                 }
 
-                foreach (var server in servers)
+                if (visibleServers.Length == 0)
+                {
+                    serverList.Children.Add(new TextBlock
+                    {
+                        Text = "没有匹配的服务器。试试其他名称或地址。",
+                        TextWrapping = TextWrapping.Wrap,
+                        Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"]
+                    });
+                    return;
+                }
+
+                foreach (var server in visibleServers)
                 {
                     var row = new Grid { ColumnSpacing = 12 };
                     row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                     row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
                     var serverLabel = new StackPanel { Spacing = 3, VerticalAlignment = VerticalAlignment.Center };
                     serverLabel.Children.Add(new TextBlock { Text = server.Name, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
+                    if (server.IsPinned)
+                    {
+                        serverLabel.Children.Add(new TextBlock
+                        {
+                            Text = "已置顶 · 常用服务器",
+                            FontSize = 11,
+                            Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaAccentBrush"]
+                        });
+                    }
                     serverLabel.Children.Add(new TextBlock { Text = server.Address, FontSize = 12, Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"] });
+                    var statusText = new TextBlock
+                    {
+                        Text = serverStatuses.TryGetValue(server.Id, out var status) ? FormatServerStatus(status) : "尚未检查",
+                        FontSize = 11,
+                        TextWrapping = TextWrapping.Wrap,
+                        Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"]
+                    };
+                    serverStatusLabels[server.Id] = statusText;
+                    serverLabel.Children.Add(statusText);
                     row.Children.Add(serverLabel);
 
                     var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
                     var launchButton = new Button { Content = "快速启动", Style = (Style)Microsoft.UI.Xaml.Application.Current.Resources["AccentButtonStyle"] };
                     launchButton.Click += async (_, _) =>
                     {
-                        dialog.Hide();
-                        await LaunchProfileWithQuickPlayAsync(profileId, new MinecraftQuickPlayTarget(MinecraftQuickPlayKind.MultiplayerServer, server.Address));
+                        await LaunchServerBookmarkAsync(server);
                     };
-                    var removeButton = new Button { Content = "移除" };
-                    removeButton.Click += async (_, _) =>
+                    var serverActions = new MenuFlyout();
+                    var pinItem = new MenuFlyoutItem { Text = server.IsPinned ? "取消置顶" : "置顶为常用服务器" };
+                    pinItem.Click += async (_, _) =>
                     {
                         try
                         {
-                            await ViewModel.RemoveServerBookmarkAsync(profileId, server.Id);
+                            await ViewModel.SetServerBookmarkPinnedAsync(profileId, server.Id, !server.IsPinned);
                             servers = await ViewModel.ListServerBookmarksAsync(profileId);
                             AddServerRows();
                         }
@@ -484,8 +879,51 @@ public sealed partial class LibraryPage : Page
                             serverError.Visibility = Visibility.Visible;
                         }
                     };
+                    serverActions.Items.Add(pinItem);
+                    serverActions.Items.Add(new MenuFlyoutSeparator());
+                    var editItem = new MenuFlyoutItem { Text = "编辑服务器" };
+                    editItem.Click += (_, _) =>
+                    {
+                        editingServerId = server.Id;
+                        serverNameInput.Text = server.Name;
+                        serverAddressInput.Text = server.Address;
+                        serverError.Text = string.Empty;
+                        serverError.Visibility = Visibility.Collapsed;
+                        cancelServerEditButton.Visibility = Visibility.Visible;
+                        dialog.PrimaryButtonText = "保存更改";
+                        serverNameInput.Focus(FocusState.Programmatic);
+                    };
+                    serverActions.Items.Add(editItem);
+                    var removeItem = new MenuFlyoutItem { Text = "移除收藏" };
+                    removeItem.Click += async (_, _) =>
+                    {
+                        try
+                        {
+                            await ViewModel.RemoveServerBookmarkAsync(profileId, server.Id);
+                            if (editingServerId == server.Id)
+                            {
+                                editingServerId = null;
+                                serverNameInput.Text = string.Empty;
+                                serverAddressInput.Text = string.Empty;
+                                cancelServerEditButton.Visibility = Visibility.Collapsed;
+                                dialog.PrimaryButtonText = "添加收藏";
+                            }
+
+                            servers = await ViewModel.ListServerBookmarksAsync(profileId);
+                            AddServerRows();
+                        }
+                        catch (Exception exception)
+                        {
+                            serverError.Text = exception.Message;
+                            serverError.Visibility = Visibility.Visible;
+                        }
+                    };
+                    serverActions.Items.Add(removeItem);
+                    var optionsButton = new Button { Content = "⋯" };
+                    ToolTipService.SetToolTip(optionsButton, "服务器选项");
+                    optionsButton.Flyout = serverActions;
                     actions.Children.Add(launchButton);
-                    actions.Children.Add(removeButton);
+                    actions.Children.Add(optionsButton);
                     Grid.SetColumn(actions, 1);
                     row.Children.Add(actions);
 
@@ -494,8 +932,129 @@ public sealed partial class LibraryPage : Page
                 }
             }
 
+            string FormatServerStatus(MinecraftServerStatus status)
+            {
+                if (!status.IsOnline)
+                {
+                    return status.ErrorMessage ?? "离线或无法连接";
+                }
+
+                var details = new List<string>();
+                if (!string.IsNullOrWhiteSpace(status.VersionName)) details.Add(status.VersionName);
+                if (status.OnlinePlayers is { } online && status.MaxPlayers is { } maximum) details.Add($"{online}/{maximum} 人");
+                if (status.LatencyMilliseconds is { } latency) details.Add($"{latency} ms");
+                if (!string.IsNullOrWhiteSpace(status.Description)) details.Add(status.Description);
+                return details.Count == 0 ? "在线" : string.Join(" · ", details);
+            }
+
+            async Task LaunchServerBookmarkAsync(MinecraftServerBookmark server)
+            {
+                if (serverStatuses.TryGetValue(server.Id, out var status) && !status.IsOnline)
+                {
+                    dialog.Hide();
+                    var warningDialog = new ContentDialog
+                    {
+                        Title = "服务器当前无法连接",
+                        Content = new TextBlock
+                        {
+                            Text = $"最近一次状态检查未能连接到“{server.Name}”（{server.Address}）。服务器可能已离线，或网络暂时不可用。仍要启动并尝试连接吗?\n\n{status.ErrorMessage}",
+                            TextWrapping = TextWrapping.Wrap
+                        },
+                        PrimaryButtonText = "仍然启动",
+                        CloseButtonText = "返回服务器列表",
+                        DefaultButton = ContentDialogButton.Close,
+                        XamlRoot = XamlRoot
+                    };
+
+                    if (await warningDialog.ShowAsync() != ContentDialogResult.Primary)
+                    {
+                        await dialog.ShowAsync();
+                        return;
+                    }
+                }
+                else
+                {
+                    dialog.Hide();
+                }
+
+                await LaunchProfileWithQuickPlayAsync(profileId, new MinecraftQuickPlayTarget(MinecraftQuickPlayKind.MultiplayerServer, server.Address));
+            }
+
+            async Task RefreshServerStatusesAsync()
+            {
+                if (serverStatusCheckInProgress)
+                {
+                    serverStatusRefreshRequested = true;
+                    return;
+                }
+
+                if (servers.Count == 0) return;
+                serverStatusCheckInProgress = true;
+                serverStatusRefreshRequested = false;
+                serverStatusRefreshButton.IsEnabled = false;
+                var targets = servers.ToArray();
+                foreach (var server in targets)
+                {
+                    if (serverStatusLabels.TryGetValue(server.Id, out var label)) label.Text = "正在检查…";
+                }
+
+                using var concurrencyLimit = new SemaphoreSlim(4);
+                try
+                {
+                    var checks = targets.Select(async server =>
+                    {
+                        await concurrencyLimit.WaitAsync(serverStatusCancellation.Token);
+                        try
+                        {
+                            var status = await ViewModel.GetServerBookmarkStatusAsync(profileId, server.Id, serverStatusCancellation.Token);
+                            var currentServer = servers.FirstOrDefault(item => item.Id == server.Id);
+                            if (currentServer is not null && string.Equals(currentServer.Address, server.Address, StringComparison.OrdinalIgnoreCase))
+                            {
+                                serverStatuses[server.Id] = status;
+                                if (serverStatusLabels.TryGetValue(server.Id, out var label)) label.Text = FormatServerStatus(status);
+                            }
+                        }
+                        catch (OperationCanceledException) when (serverStatusCancellation.IsCancellationRequested)
+                        {
+                            // The dialog closed while the status query was running.
+                        }
+                        catch (Exception)
+                        {
+                            var status = new MinecraftServerStatus(false, null, null, null, null, string.Empty, "无法读取服务器状态");
+                            var currentServer = servers.FirstOrDefault(item => item.Id == server.Id);
+                            if (currentServer is not null && string.Equals(currentServer.Address, server.Address, StringComparison.OrdinalIgnoreCase))
+                            {
+                                serverStatuses[server.Id] = status;
+                                if (serverStatusLabels.TryGetValue(server.Id, out var label)) label.Text = FormatServerStatus(status);
+                            }
+                        }
+                        finally
+                        {
+                            concurrencyLimit.Release();
+                        }
+                    });
+                    await Task.WhenAll(checks);
+                }
+                catch (OperationCanceledException) when (serverStatusCancellation.IsCancellationRequested)
+                {
+                    // The dialog closed while queued checks were waiting for a slot.
+                }
+                finally
+                {
+                    serverStatusCheckInProgress = false;
+                    serverStatusRefreshButton.IsEnabled = servers.Count > 0;
+                    if (serverStatusRefreshRequested && servers.Count > 0)
+                    {
+                        _ = RefreshServerStatusesAsync();
+                    }
+                }
+            }
+
             AddWorldRows();
             AddServerRows();
+            serverSearchInput.TextChanged += (_, _) => AddServerRows();
+            serverStatusRefreshButton.Click += async (_, _) => await RefreshServerStatusesAsync();
+            dialog.Closed += (_, _) => serverStatusCancellation.Cancel();
 
             var worldImportButton = new Button { Content = "导入世界 ZIP…" };
             worldImportButton.Click += async (_, _) =>
@@ -570,21 +1129,44 @@ public sealed partial class LibraryPage : Page
             var serverForm = new StackPanel { Spacing = 8 };
             serverForm.Children.Add(serverNameInput);
             serverForm.Children.Add(serverAddressInput);
+            serverForm.Children.Add(cancelServerEditButton);
+            cancelServerEditButton.Click += (_, _) =>
+            {
+                editingServerId = null;
+                serverNameInput.Text = string.Empty;
+                serverAddressInput.Text = string.Empty;
+                serverError.Text = string.Empty;
+                serverError.Visibility = Visibility.Collapsed;
+                cancelServerEditButton.Visibility = Visibility.Collapsed;
+                dialog.PrimaryButtonText = "添加收藏";
+            };
 
             var serverContent = new Grid { RowSpacing = 12, Margin = new Thickness(0, 12, 0, 0) };
             serverContent.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             serverContent.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             serverContent.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            serverContent.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             serverContent.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            var serverDescription = new TextBlock { Text = "保存常用地址，直接进入支持 Quick Play 的 Minecraft 版本。", TextWrapping = TextWrapping.Wrap, Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"] };
+            var serverDescription = new TextBlock { Text = "可收藏多个常用地址；支持 Quick Play 的版本可直达服务器，不支持时会询问是否普通启动。", TextWrapping = TextWrapping.Wrap, Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"] };
             var serverListScrollViewer = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = serverList };
+            var serverBrowseControls = new StackPanel { Spacing = 4 };
+            var serverBrowseHeader = new Grid { ColumnSpacing = 8 };
+            serverBrowseHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            serverBrowseHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            serverBrowseHeader.Children.Add(serverCountText);
+            Grid.SetColumn(serverStatusRefreshButton, 1);
+            serverBrowseHeader.Children.Add(serverStatusRefreshButton);
+            serverBrowseControls.Children.Add(serverBrowseHeader);
+            serverBrowseControls.Children.Add(serverSearchInput);
             serverContent.Children.Add(serverDescription);
             serverContent.Children.Add(serverForm);
             serverContent.Children.Add(serverError);
+            serverContent.Children.Add(serverBrowseControls);
             serverContent.Children.Add(serverListScrollViewer);
             Grid.SetRow(serverForm, 1);
             Grid.SetRow(serverError, 2);
-            Grid.SetRow(serverListScrollViewer, 3);
+            Grid.SetRow(serverBrowseControls, 3);
+            Grid.SetRow(serverListScrollViewer, 4);
             var serverTab = new TabViewItem { Header = "服务器", IsClosable = false, Content = serverContent };
             var tabView = new TabView { IsAddTabButtonVisible = false, Width = 650, Height = 460 };
             tabView.TabItems.Add(worldTab);
@@ -592,23 +1174,36 @@ public sealed partial class LibraryPage : Page
             void UpdatePrimaryAction()
             {
                 var onServerTab = ReferenceEquals(tabView.SelectedItem, serverTab);
-                dialog.PrimaryButtonText = onServerTab ? "添加收藏" : string.Empty;
+                dialog.PrimaryButtonText = onServerTab ? (editingServerId.HasValue ? "保存更改" : "添加收藏") : string.Empty;
                 dialog.DefaultButton = onServerTab ? ContentDialogButton.Primary : ContentDialogButton.Close;
             }
             tabView.SelectionChanged += (_, _) => UpdatePrimaryAction();
             UpdatePrimaryAction();
-            dialog.PrimaryButtonClick += async (_, args) =>
+            dialog.PrimaryButtonClick += async (sender, args) =>
             {
                 args.Cancel = true;
                 var deferral = args.GetDeferral();
                 try
                 {
-                    await ViewModel.AddServerBookmarkAsync(profileId, serverNameInput.Text, serverAddressInput.Text);
+                    if (editingServerId is { } bookmarkId)
+                    {
+                        await ViewModel.UpdateServerBookmarkAsync(profileId, bookmarkId, serverNameInput.Text, serverAddressInput.Text);
+                        serverStatuses.Remove(bookmarkId);
+                        editingServerId = null;
+                        cancelServerEditButton.Visibility = Visibility.Collapsed;
+                    }
+                    else
+                    {
+                        await ViewModel.AddServerBookmarkAsync(profileId, serverNameInput.Text, serverAddressInput.Text);
+                    }
+
                     serverNameInput.Text = string.Empty;
                     serverAddressInput.Text = string.Empty;
                     serverError.Visibility = Visibility.Collapsed;
+                    dialog.PrimaryButtonText = ReferenceEquals(tabView.SelectedItem, serverTab) ? "添加收藏" : string.Empty;
                     servers = await ViewModel.ListServerBookmarksAsync(profileId);
                     AddServerRows();
+                    _ = RefreshServerStatusesAsync();
                 }
                 catch (Exception exception)
                 {
@@ -621,6 +1216,7 @@ public sealed partial class LibraryPage : Page
                 }
             };
             dialog.Content = tabView;
+            _ = RefreshServerStatusesAsync();
             await dialog.ShowAsync();
         }
         catch (Exception exception)
@@ -655,7 +1251,30 @@ public sealed partial class LibraryPage : Page
         ErrorInfoBar.IsOpen = false;
         try
         {
+            if (!await ConfirmLaunchMemoryIfNeededAsync(profileId)) return;
             await ViewModel.LaunchProfileAsync(profileId, quickPlayTarget: target);
+        }
+        catch (MinecraftQuickPlayNotSupportedException exception)
+        {
+            await App.CurrentApp.Logger.InformationAsync("profile.quick_play_unavailable", exception.Message);
+            var fallbackDialog = new ContentDialog
+            {
+                Title = "此 Minecraft 版本不支持快速启动",
+                Content = new TextBlock
+                {
+                    Text = $"Minecraft {exception.VersionId} 没有提供官方 Quick Play 参数。可以普通启动游戏，再从 Minecraft 菜单中选择世界或连接服务器。",
+                    TextWrapping = TextWrapping.Wrap
+                },
+                PrimaryButtonText = "普通启动",
+                CloseButtonText = "取消",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = XamlRoot
+            };
+
+            if (await fallbackDialog.ShowAsync() == ContentDialogResult.Primary)
+            {
+                await LaunchProfileNormallyAsync(profileId, memoryWarningAlreadyConfirmed: true);
+            }
         }
         catch (MinecraftAccountRequiredException exception)
         {
@@ -671,6 +1290,30 @@ public sealed partial class LibraryPage : Page
         {
             await App.CurrentApp.Logger.ErrorAsync("profile.quick_play_failed", "Minecraft Quick Play could not be started.", exception);
             ShowError("快速启动失败", "请检查 Minecraft 版本、账户和服务器地址。", exception.Message);
+        }
+    }
+
+    private async Task LaunchProfileNormallyAsync(Guid profileId, bool memoryWarningAlreadyConfirmed = false)
+    {
+        try
+        {
+            if (!memoryWarningAlreadyConfirmed && !await ConfirmLaunchMemoryIfNeededAsync(profileId)) return;
+            await ViewModel.LaunchProfileAsync(profileId);
+        }
+        catch (MinecraftAccountRequiredException exception)
+        {
+            await App.CurrentApp.Logger.InformationAsync("profile.launch_needs_account", exception.Message);
+            App.CurrentApp.RequestNavigation("accounts");
+        }
+        catch (MinecraftClientIdNotAuthorizedException exception)
+        {
+            await App.CurrentApp.Logger.ErrorAsync("profile.launch_client_id_not_authorized", "The Minecraft account application is not authorized.", exception);
+            App.CurrentApp.RequestNavigation("accounts");
+        }
+        catch (Exception exception)
+        {
+            await App.CurrentApp.Logger.ErrorAsync("profile.normal_launch_failed", "Minecraft could not be started without Quick Play.", exception);
+            ShowError("无法普通启动", "请检查实例文件、账户和 Java 运行环境。", exception.Message);
         }
     }
 
@@ -1380,11 +2023,11 @@ public sealed partial class LibraryPage : Page
         }
     }
 
-    private async void ImportModrinthPack_Click(object sender, RoutedEventArgs e)
+    private async void ImportModpack_Click(object sender, RoutedEventArgs e)
     {
         try
         {
-            await ImportModrinthPackAsync();
+            await ImportModpackArchiveAsync();
         }
         catch (OperationCanceledException)
         {
@@ -2440,6 +3083,14 @@ public sealed partial class LibraryPage : Page
     private async Task ShowModrinthPackBrowserAsync()
     {
         var queryInput = new TextBox { PlaceholderText = "搜索整合包；留空可浏览热门整合包", MaxLength = 100, MinWidth = 0 };
+        var gameVersionInput = new TextBox { PlaceholderText = "Minecraft 版本（可选，例如 1.20.1）", MaxLength = 32, MinWidth = 0 };
+        var loaderInput = new ComboBox { MinWidth = 0, PlaceholderText = "全部加载器" };
+        loaderInput.Items.Add(new ComboBoxItem { Content = "全部加载器", Tag = string.Empty });
+        loaderInput.Items.Add(new ComboBoxItem { Content = "Fabric", Tag = "fabric" });
+        loaderInput.Items.Add(new ComboBoxItem { Content = "Quilt", Tag = "quilt" });
+        loaderInput.Items.Add(new ComboBoxItem { Content = "Forge", Tag = "forge" });
+        loaderInput.Items.Add(new ComboBoxItem { Content = "NeoForge", Tag = "neoforge" });
+        loaderInput.SelectedIndex = 0;
         var searchButton = new Button { Content = "搜索", MinWidth = 76 };
         var sortInput = CreateModrinthSortPicker();
         sortInput.SelectedIndex = 1;
@@ -2453,6 +3104,8 @@ public sealed partial class LibraryPage : Page
         var searchInProgress = false;
         string? lastSearchQuery = null;
         string? lastSortOrder = null;
+        string? lastGameVersion = null;
+        string? lastLoader = null;
         var content = new StackPanel { Spacing = 10 };
         content.Children.Add(new TextBlock
         {
@@ -2470,6 +3123,13 @@ public sealed partial class LibraryPage : Page
         searchControls.Children.Add(sortInput);
         searchControls.Children.Add(searchButton);
         content.Children.Add(searchControls);
+        var filterControls = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+        filterControls.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        filterControls.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        Grid.SetColumn(loaderInput, 1);
+        filterControls.Children.Add(gameVersionInput);
+        filterControls.Children.Add(loaderInput);
+        content.Children.Add(filterControls);
         content.Children.Add(searchStatus);
         content.Children.Add(loadMoreButton);
         content.Children.Add(new ScrollViewer
@@ -2498,7 +3158,13 @@ public sealed partial class LibraryPage : Page
             }
 
             var sortOrder = GetModrinthSortOrder(sortInput);
-            if (loadMore && (!string.Equals(lastSearchQuery, queryInput.Text, StringComparison.Ordinal) || !string.Equals(lastSortOrder, sortOrder, StringComparison.Ordinal)))
+            var gameVersion = string.IsNullOrWhiteSpace(gameVersionInput.Text) ? null : gameVersionInput.Text.Trim();
+            var loader = (loaderInput.SelectedItem as ComboBoxItem)?.Tag as string;
+            if (string.IsNullOrWhiteSpace(loader)) loader = null;
+            if (loadMore && (!string.Equals(lastSearchQuery, queryInput.Text, StringComparison.Ordinal) ||
+                             !string.Equals(lastSortOrder, sortOrder, StringComparison.Ordinal) ||
+                             !string.Equals(lastGameVersion, gameVersion, StringComparison.OrdinalIgnoreCase) ||
+                             !string.Equals(lastLoader, loader, StringComparison.OrdinalIgnoreCase)))
             {
                 loadMore = false;
             }
@@ -2512,6 +3178,8 @@ public sealed partial class LibraryPage : Page
                 searchTotalHits = 0;
                 lastSearchQuery = queryInput.Text;
                 lastSortOrder = sortOrder;
+                lastGameVersion = gameVersion;
+                lastLoader = loader;
                 resultsPanel.Children.Clear();
                 loadMoreButton.Visibility = Visibility.Collapsed;
             }
@@ -2519,7 +3187,12 @@ public sealed partial class LibraryPage : Page
             searchStatus.Text = loadMore ? "正在加载更多 Modrinth 整合包…" : "正在搜索 Modrinth 整合包…";
             try
             {
-                var page = await ViewModel.SearchModrinthModpacksAsync(queryInput.Text, sortOrder, searchOffset);
+                var page = await ViewModel.SearchModrinthModpacksAsync(
+                    queryInput.Text,
+                    sortOrder,
+                    searchOffset,
+                    gameVersion: gameVersion,
+                    loader: loader);
                 var projects = page.Projects;
                 searchOffset = Math.Min(page.Offset + page.Limit, page.TotalHits);
                 searchTotalHits = page.TotalHits;
@@ -2640,6 +3313,21 @@ public sealed partial class LibraryPage : Page
                 await SearchModpacksAsync(loadMore: false);
             }
         };
+        loaderInput.SelectionChanged += async (_, _) =>
+        {
+            if (lastSearchQuery is not null)
+            {
+                await SearchModpacksAsync(loadMore: false);
+            }
+        };
+        gameVersionInput.KeyDown += async (_, args) =>
+        {
+            if (args.Key == Windows.System.VirtualKey.Enter)
+            {
+                args.Handled = true;
+                await SearchModpacksAsync(loadMore: false);
+            }
+        };
 
         _ = SearchModpacksAsync(loadMore: false);
         await dialog.ShowAsync();
@@ -2663,11 +3351,13 @@ public sealed partial class LibraryPage : Page
         }
     }
 
-    private async Task ImportModrinthPackAsync()
+    private async Task ImportModpackArchiveAsync()
     {
         var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(App.CurrentApp.WindowHandle);
         var picker = new FileOpenPicker(windowId);
         picker.FileTypeFilter.Add(".mrpack");
+        picker.FileTypeFilter.Add(".zip");
+        picker.CommitButtonText = "导入整合包";
 
         var selectedFile = await picker.PickSingleFileAsync();
         if (selectedFile is null)
@@ -2675,7 +3365,149 @@ public sealed partial class LibraryPage : Page
             return;
         }
 
-        await ImportModrinthPackArchiveAsync(selectedFile.Path);
+        if (string.Equals(Path.GetExtension(selectedFile.Path), ".zip", StringComparison.OrdinalIgnoreCase))
+        {
+            await ImportCurseForgePackArchiveAsync(selectedFile.Path);
+        }
+        else
+        {
+            await ImportModrinthPackArchiveAsync(selectedFile.Path);
+        }
+    }
+
+    private async Task ImportCurseForgePackArchiveAsync(string archivePath)
+    {
+        CurseForgeModpackDescription description;
+        try
+        {
+            description = await ViewModel.InspectCurseForgePackAsync(archivePath);
+        }
+        catch (Exception exception)
+        {
+            await App.CurrentApp.Logger.ErrorAsync("curseforge.modpack_inspect_failed", "The selected CurseForge ZIP modpack could not be read.", exception);
+            ShowError("无法读取 ZIP 整合包", "请选择 CurseForge 导出的 Minecraft 整合包 ZIP。", exception.Message);
+            return;
+        }
+
+        var nameInput = new TextBox
+        {
+            Header = "实例名称",
+            Text = description.Name.Length <= 40 ? description.Name : description.Name[..40],
+            MaxLength = 40
+        };
+        var loaderName = description.LoaderType switch
+        {
+            MinecraftLoaderType.Fabric => $"Fabric Loader {description.LoaderVersion}",
+            MinecraftLoaderType.Quilt => $"Quilt Loader {description.LoaderVersion}",
+            MinecraftLoaderType.Forge => $"Forge {description.LoaderVersion}",
+            MinecraftLoaderType.NeoForge => $"NeoForge {description.LoaderVersion}",
+            _ => "原版（Vanilla）"
+        };
+        var content = new StackPanel { Spacing = 12 };
+        content.Children.Add(nameInput);
+        content.Children.Add(new TextBlock
+        {
+            Text = $"CurseForge · {description.Author}\nMinecraft {description.MinecraftVersion} · {loaderName}\n文件 {description.Files.Count} 个，overrides 配置文件 {description.OverrideFiles} 个。",
+            TextWrapping = TextWrapping.Wrap
+        });
+        var optionalChoices = new List<CheckBox>();
+        var optionalFiles = description.Files.Where(file => !file.Required).ToArray();
+        if (optionalFiles.Length > 0)
+        {
+            content.Children.Add(new TextBlock { Text = "可选文件", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+            var choicesPanel = new StackPanel { Spacing = 6 };
+            foreach (var optionalFile in optionalFiles)
+            {
+                var choice = new CheckBox
+                {
+                    Content = $"项目 {optionalFile.ProjectId} · 文件 {optionalFile.FileId}",
+                    Tag = $"{optionalFile.ProjectId}:{optionalFile.FileId}",
+                    IsChecked = true
+                };
+                optionalChoices.Add(choice);
+                choicesPanel.Children.Add(choice);
+            }
+
+            content.Children.Add(new ScrollViewer
+            {
+                Content = choicesPanel,
+                MaxHeight = 200,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+            });
+        }
+
+        bool hasCurseForgeApiKey;
+        try
+        {
+            hasCurseForgeApiKey = !string.IsNullOrWhiteSpace(await App.CurrentApp.CurseForgeApiKeyStore.ReadAsync());
+        }
+        catch (Exception exception)
+        {
+            await App.CurrentApp.Logger.ErrorAsync("curseforge.api_key_read_failed", "The CurseForge API key could not be read while importing a modpack.", exception);
+            ShowError("无法读取 CurseForge API Key", "请在设置 > CurseForge 检查密钥状态。", exception.Message);
+            return;
+        }
+        if (description.Files.Count > 0 && !hasCurseForgeApiKey)
+        {
+            content.Children.Add(new InfoBar
+            {
+                IsOpen = true,
+                IsClosable = false,
+                Severity = InfoBarSeverity.Warning,
+                Title = "将手动下载部分模组",
+                Message = "未配置 CurseForge API Key。Sakana 仍会安装 Minecraft、加载器和整合包配置；模组文件会列出官方页面，供你手动下载后导入。"
+            });
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = "导入 CurseForge 整合包",
+            Content = content,
+            PrimaryButtonText = "导入并安装",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = XamlRoot
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+
+        InstanceProfile profile;
+        try
+        {
+            profile = await ViewModel.ImportCurseForgePackAsync(
+                archivePath,
+                nameInput.Text,
+                optionalChoices.Where(choice => choice.IsChecked == true).Select(choice => (string)choice.Tag).ToArray());
+            RefreshGroupFilterOptions();
+            ApplyLibraryFilter();
+            UpdateLibraryListVisibility();
+            ErrorInfoBar.IsOpen = false;
+        }
+        catch (ProfileNameInUseException)
+        {
+            ShowError("配置名称已存在", "请为这个整合包输入一个不同的实例名称。", string.Empty);
+            return;
+        }
+        catch (Exception exception)
+        {
+            await App.CurrentApp.Logger.ErrorAsync("curseforge.modpack_import_failed", "The CurseForge modpack could not be imported.", exception);
+            ShowError("无法导入 ZIP 整合包", "Sakana 无法创建这个整合包实例。", exception.Message);
+            return;
+        }
+
+        try
+        {
+            var manualDownloads = await ViewModel.InstallProfileAsync(profile.Id);
+            await OfferCurseForgeManualDownloadsAsync(profile.Id, manualDownloads);
+        }
+        catch (OperationCanceledException)
+        {
+            // The import remains in the library and can be installed later.
+        }
+        catch (Exception exception)
+        {
+            await App.CurrentApp.Logger.ErrorAsync("curseforge.modpack_install_failed", "The imported CurseForge modpack could not be installed.", exception);
+            ShowError("整合包安装失败", "实例已保存在实例库中，可稍后重试。", exception.Message);
+        }
     }
 
     private async Task ImportModrinthPackArchiveAsync(
@@ -3270,7 +4102,8 @@ public sealed partial class LibraryPage : Page
         ErrorInfoBar.IsOpen = false;
         try
         {
-            await ViewModel.InstallProfileAsync(profileId);
+            var manualDownloads = await ViewModel.InstallProfileAsync(profileId);
+            await OfferCurseForgeManualDownloadsAsync(profileId, manualDownloads);
         }
         catch (OperationCanceledException)
         {
@@ -3303,7 +4136,8 @@ public sealed partial class LibraryPage : Page
         var profileName = ViewModel.Profiles.FirstOrDefault(profile => profile.Id == profileId)?.Name ?? "实例";
         try
         {
-            await ViewModel.RepairProfileAsync(profileId);
+            var manualDownloads = await ViewModel.RepairProfileAsync(profileId);
+            await OfferCurseForgeManualDownloadsAsync(profileId, manualDownloads);
             RepairInfoBar.Severity = InfoBarSeverity.Success;
             RepairInfoBar.Title = "校验完成";
             RepairInfoBar.Message = $"{profileName} 的官方游戏文件和 Java 运行时已校验；缺失或损坏的文件已自动下载。世界存档和实例配置未被改动。";
@@ -3317,6 +4151,130 @@ public sealed partial class LibraryPage : Page
         {
             await App.CurrentApp.Logger.ErrorAsync("profile.repair_failed", "The Minecraft instance could not be checked or repaired.", exception);
             ShowError("校验或修复失败", "请检查下载状态和 Sakana 日志，然后重试。", exception.Message);
+        }
+    }
+
+    private async Task OfferCurseForgeManualDownloadsAsync(Guid profileId, IReadOnlyList<CurseForgeManualDownload> manualDownloads)
+    {
+        if (manualDownloads.Count == 0)
+        {
+            return;
+        }
+
+        var content = new StackPanel { Spacing = 10 };
+        content.Children.Add(new TextBlock
+        {
+            Text = $"其余 {manualDownloads.Count} 个文件已跳过第三方下载并继续完成安装。请在 CurseForge 官方页面手动下载，然后选择下载的 JAR；Sakana 会将其导入此实例的 mods 文件夹。",
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        const int pageSize = 50;
+        var pageIndex = 0;
+        var pageCount = (manualDownloads.Count + pageSize - 1) / pageSize;
+        var linksPanel = new StackPanel { Spacing = 4 };
+        var pageLabel = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
+        var previousPageButton = new Button { Content = "上一页" };
+        var nextPageButton = new Button { Content = "下一页" };
+        void RenderManualDownloadPage()
+        {
+            linksPanel.Children.Clear();
+            foreach (var file in manualDownloads.Skip(pageIndex * pageSize).Take(pageSize))
+            {
+                var openPageButton = new Button
+                {
+                    Content = $"{file.ProjectName} · {file.FileName}  ↗",
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    HorizontalContentAlignment = HorizontalAlignment.Left,
+                    Tag = file.OfficialPageUrl
+                };
+                openPageButton.Click += async (_, _) =>
+                {
+                    if (openPageButton.Tag is string url && Uri.TryCreate(url, UriKind.Absolute, out var pageUri))
+                    {
+                        try
+                        {
+                            await Windows.System.Launcher.LaunchUriAsync(pageUri);
+                        }
+                        catch (Exception exception)
+                        {
+                            await App.CurrentApp.Logger.ErrorAsync("curseforge.manual_page_open_failed", "A CurseForge project page could not be opened.", exception);
+                            ShowError("无法打开 CurseForge 页面", "请复制并在浏览器中打开这个项目页面。", exception.Message);
+                        }
+                    }
+                };
+                linksPanel.Children.Add(openPageButton);
+            }
+
+            pageLabel.Text = $"第 {pageIndex + 1} / {pageCount} 页 · 共 {manualDownloads.Count} 个文件";
+            previousPageButton.IsEnabled = pageIndex > 0;
+            nextPageButton.IsEnabled = pageIndex + 1 < pageCount;
+        }
+
+        previousPageButton.Click += (_, _) =>
+        {
+            if (pageIndex > 0) pageIndex--;
+            RenderManualDownloadPage();
+        };
+        nextPageButton.Click += (_, _) =>
+        {
+            if (pageIndex + 1 < pageCount) pageIndex++;
+            RenderManualDownloadPage();
+        };
+        RenderManualDownloadPage();
+        var pageNavigation = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            HorizontalAlignment = HorizontalAlignment.Right
+        };
+        pageNavigation.Children.Add(previousPageButton);
+        pageNavigation.Children.Add(pageLabel);
+        pageNavigation.Children.Add(nextPageButton);
+
+        content.Children.Add(new ScrollViewer
+        {
+            Content = linksPanel,
+            MaxHeight = 260,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        });
+        content.Children.Add(pageNavigation);
+
+        var dialog = new ContentDialog
+        {
+            Title = "需要从 CurseForge 手动下载",
+            Content = content,
+            PrimaryButtonText = "选择已下载的 JAR",
+            CloseButtonText = "稍后处理",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = XamlRoot
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(App.CurrentApp.WindowHandle);
+        var picker = new FileOpenPicker(windowId);
+        picker.FileTypeFilter.Add(".jar");
+        picker.CommitButtonText = "导入到实例";
+        var selectedFiles = await picker.PickMultipleFilesAsync();
+        if (selectedFiles.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var result = await ViewModel.ImportLocalModsAsync(profileId, selectedFiles.Select(file => file.Path).ToArray());
+            ErrorInfoBar.Severity = InfoBarSeverity.Informational;
+            ErrorInfoBar.Title = "手动下载的模组已导入";
+            ErrorInfoBar.Message = $"已导入 {result.ImportedCount} 个模组；跳过同名文件 {result.SkippedDuplicateCount} 个。";
+            ErrorInfoBar.IsOpen = true;
+        }
+        catch (Exception exception)
+        {
+            await App.CurrentApp.Logger.ErrorAsync("curseforge.manual_mod_import_failed", "Manually downloaded CurseForge mods could not be imported.", exception);
+            ShowError("无法导入手动下载的模组", "请选择已下载的 Minecraft 模组 JAR 文件。", exception.Message);
         }
     }
 
@@ -3334,7 +4292,7 @@ public sealed partial class LibraryPage : Page
         }
 
         var globalSettings = (await ViewModel.GetSettingsAsync()).GlobalLaunchSettings;
-        var currentSettings = profile.UseGlobalLaunchSettings
+        InstanceLaunchSettings GetEffectiveSettings(InstanceCardViewModel candidate) => candidate.UseGlobalLaunchSettings
             ? new InstanceLaunchSettings(
                 globalSettings.UseAutomaticMemory,
                 globalSettings.MinMemoryMb,
@@ -3345,18 +4303,88 @@ public sealed partial class LibraryPage : Page
                 globalSettings.Fullscreen,
                 globalSettings.WindowWidth,
                 globalSettings.WindowHeight,
-                UseGlobalSettings: true)
+                UseGlobalSettings: true,
+                MinecraftAccountUuid: candidate.MinecraftAccountUuid)
             : new InstanceLaunchSettings(
-                profile.UseAutomaticMemory,
-                profile.MinMemoryMb,
-                profile.MaxMemoryMb,
-                profile.JavaExecutablePath,
-                profile.CustomJavaArguments,
-                ParseEnvironmentVariables(FormatEnvironmentVariables(profile.CustomEnvironmentVariablesJson)),
-                profile.Fullscreen,
-                profile.WindowWidth,
-                profile.WindowHeight,
-                UseGlobalSettings: false);
+                candidate.UseAutomaticMemory,
+                candidate.MinMemoryMb,
+                candidate.MaxMemoryMb,
+                candidate.JavaExecutablePath,
+                candidate.CustomJavaArguments,
+                ParseEnvironmentVariables(FormatEnvironmentVariables(candidate.CustomEnvironmentVariablesJson)),
+                candidate.Fullscreen,
+                candidate.WindowWidth,
+                candidate.WindowHeight,
+                UseGlobalSettings: false,
+                MinecraftAccountUuid: candidate.MinecraftAccountUuid);
+        var currentSettings = GetEffectiveSettings(profile);
+
+        IReadOnlyList<MinecraftAccountInfo> savedAccounts = [];
+        var accountSelectionStatus = new TextBlock
+        {
+            Text = "留空会跟随账户页中的当前账户；指定账户只应用于此实例。",
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"]
+        };
+        var accountSelector = new ComboBox
+        {
+            Header = "启动此实例时使用的账户",
+            PlaceholderText = "跟随账户页中的当前账户",
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        var followCurrentAccountItem = new ComboBoxItem { Content = "跟随账户页中的当前账户" };
+        accountSelector.Items.Add(followCurrentAccountItem);
+        try
+        {
+            savedAccounts = (await ViewModel.GetSavedAccountsAsync())
+                .Where(account => !account.NeedsVerification && !string.IsNullOrWhiteSpace(account.PlayerUuid))
+                .ToArray();
+            foreach (var account in savedAccounts)
+            {
+                accountSelector.Items.Add(new ComboBoxItem
+                {
+                    Content = account.PlayerName,
+                    Tag = account.PlayerUuid
+                });
+            }
+        }
+        catch (Exception exception)
+        {
+            accountSelectionStatus.Text = $"无法读取已保存账户：{exception.Message}。仍可选择跟随账户页中的当前账户。";
+        }
+
+        void SelectAccount(string? playerUuid)
+        {
+            var savedAccountUuids = savedAccounts.Select(account => account.PlayerUuid).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var staleItem in accountSelector.Items.OfType<ComboBoxItem>()
+                         .Where(item => item.Tag is string uuid && !savedAccountUuids.Contains(uuid))
+                         .ToArray())
+            {
+                accountSelector.Items.Remove(staleItem);
+            }
+
+            var matchingItem = playerUuid is null
+                ? followCurrentAccountItem
+                : accountSelector.Items.OfType<ComboBoxItem>().FirstOrDefault(item =>
+                    string.Equals(item.Tag as string, playerUuid, StringComparison.OrdinalIgnoreCase));
+            if (playerUuid is not null && matchingItem is null)
+            {
+                matchingItem = new ComboBoxItem
+                {
+                    Content = "所选账户已不在本机保存；请选择其他账户",
+                    Tag = playerUuid
+                };
+                accountSelector.Items.Add(matchingItem);
+            }
+
+            accountSelector.SelectedItem = matchingItem ?? followCurrentAccountItem;
+        }
+
+        SelectAccount(currentSettings.MinecraftAccountUuid);
+        var accountSettingsPanel = new StackPanel { Spacing = 4 };
+        accountSettingsPanel.Children.Add(accountSelector);
+        accountSettingsPanel.Children.Add(accountSelectionStatus);
 
         var automaticMemoryToggle = new ToggleSwitch
         {
@@ -3454,6 +4482,61 @@ public sealed partial class LibraryPage : Page
         javaPathControls.Children.Add(javaBrowseButton);
         javaPathControls.Children.Add(javaResetButton);
 
+        var detectedJavaCombo = new ComboBox
+        {
+            PlaceholderText = "检测后选择本机已安装的 Java",
+            IsEnabled = false,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        var detectJavaButton = new Button { Content = "检测本机 Java", VerticalAlignment = VerticalAlignment.Center };
+        var detectedJavaStatus = new TextBlock { FontSize = 12, TextWrapping = TextWrapping.Wrap };
+        var detectJavaRow = new Grid { ColumnSpacing = 8 };
+        detectJavaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        detectJavaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(detectJavaButton, 1);
+        detectJavaRow.Children.Add(detectedJavaCombo);
+        detectJavaRow.Children.Add(detectJavaButton);
+        detectJavaButton.Click += async (_, _) =>
+        {
+            detectJavaButton.IsEnabled = false;
+            detectedJavaCombo.IsEnabled = false;
+            detectedJavaCombo.Items.Clear();
+            detectedJavaStatus.Text = "正在检查本机 Java…";
+            try
+            {
+                var installations = await ViewModel.DetectJavaInstallationsAsync();
+                foreach (var installation in installations)
+                {
+                    detectedJavaCombo.Items.Add(new ComboBoxItem
+                    {
+                        Content = $"Java {installation.MajorVersion} · {installation.Version} · {installation.ExecutablePath}",
+                        Tag = installation
+                    });
+                }
+
+                detectedJavaCombo.IsEnabled = installations.Count > 0;
+                detectedJavaStatus.Text = installations.Count == 0
+                    ? "没有找到本机 Java。自动匹配模式会按需下载；也可到设置中的 Java 运行时页面下载常用版本。"
+                    : $"找到 {installations.Count} 个 Java。选中一个即可填入当前实例的 Java 路径。";
+            }
+            catch (Exception exception)
+            {
+                detectedJavaStatus.Text = $"Java 检测失败：{exception.Message}";
+            }
+            finally
+            {
+                detectJavaButton.IsEnabled = true;
+            }
+        };
+        detectedJavaCombo.SelectionChanged += (_, _) =>
+        {
+            if (detectedJavaCombo.SelectedItem is ComboBoxItem { Tag: JavaInstallation installation })
+            {
+                javaPathInput.Text = installation.ExecutablePath;
+                customJavaToggle.IsOn = true;
+            }
+        };
+
         var javaArgumentsInput = new TextBox
         {
             Header = "自定义 Java 参数",
@@ -3491,6 +4574,8 @@ public sealed partial class LibraryPage : Page
         javaMemoryFields.Children.Add(customJavaToggle);
         javaMemoryFields.Children.Add(javaPathLabel);
         javaMemoryFields.Children.Add(javaPathControls);
+        javaMemoryFields.Children.Add(detectJavaRow);
+        javaMemoryFields.Children.Add(detectedJavaStatus);
         javaMemoryFields.Children.Add(javaArgumentsInput);
         javaMemoryFields.Children.Add(environmentVariablesInput);
 
@@ -3543,12 +4628,12 @@ public sealed partial class LibraryPage : Page
         tabs.Items.Add(new PivotItem
         {
             Header = "Java 和内存",
-            Content = new ScrollViewer { Content = javaMemoryFields, MaxHeight = 520, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }
+            Content = new ScrollViewer { Content = javaMemoryFields, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }
         });
         tabs.Items.Add(new PivotItem
         {
             Header = "游戏窗口",
-            Content = new ScrollViewer { Content = windowFields, MaxHeight = 520, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }
+            Content = new ScrollViewer { Content = windowFields, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }
         });
         var useGlobalSettingsToggle = new ToggleSwitch
         {
@@ -3559,8 +4644,223 @@ public sealed partial class LibraryPage : Page
         };
         useGlobalSettingsToggle.Toggled += (_, _) => tabs.IsEnabled = !useGlobalSettingsToggle.IsOn;
         tabs.IsEnabled = !useGlobalSettingsToggle.IsOn;
-        var dialogContent = new StackPanel { Spacing = 8 };
+
+        void ApplySettingsToControls(InstanceLaunchSettings settings)
+        {
+            useGlobalSettingsToggle.IsOn = false;
+            tabs.IsEnabled = true;
+            detectedJavaCombo.SelectedItem = null;
+            SelectAccount(settings.MinecraftAccountUuid);
+            automaticMemoryToggle.IsOn = settings.UseAutomaticMemory;
+            minMemoryInput.Value = settings.MinMemoryMb;
+            maxMemoryInput.Value = settings.MaxMemoryMb;
+            customJavaToggle.IsOn = !string.IsNullOrWhiteSpace(settings.JavaExecutablePath);
+            javaPathInput.Text = settings.JavaExecutablePath ?? string.Empty;
+            javaArgumentsInput.Text = settings.CustomJavaArguments;
+            environmentVariablesInput.Text = string.Join(Environment.NewLine, settings.CustomEnvironmentVariables
+                .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(pair => $"{pair.Key}={pair.Value}"));
+            fullscreenToggle.IsOn = settings.Fullscreen;
+            widthInput.Value = settings.WindowWidth;
+            heightInput.Value = settings.WindowHeight;
+        }
+
+        InstanceLaunchSettings ReadSettingsFromControls() => new(
+            automaticMemoryToggle.IsOn,
+            (int)minMemoryInput.Value,
+            (int)maxMemoryInput.Value,
+            customJavaToggle.IsOn ? javaPathInput.Text.Trim() : null,
+            javaArgumentsInput.Text,
+            ParseEnvironmentVariables(environmentVariablesInput.Text),
+            fullscreenToggle.IsOn,
+            (int)widthInput.Value,
+            (int)heightInput.Value,
+            UseGlobalSettings: false,
+            MinecraftAccountUuid: (accountSelector.SelectedItem as ComboBoxItem)?.Tag as string);
+
+        void ValidatePreset(InstanceLaunchSettingsPreset preset)
+        {
+            if (preset.SchemaVersion != InstanceLaunchSettingsPreset.CurrentSchemaVersion)
+            {
+                throw new InvalidDataException("此设置模板版本不受支持。");
+            }
+
+            if (preset.MinMemoryMb is < 256 or > 65536 || preset.MaxMemoryMb is < 256 or > 65536 ||
+                preset.MinMemoryMb > preset.MaxMemoryMb || preset.WindowWidth is < 640 or > 16384 ||
+                preset.WindowHeight is < 480 or > 16384 || (preset.CustomJavaArguments?.Length ?? 0) > 8192)
+            {
+                throw new InvalidDataException("模板中的内存、窗口尺寸或 Java 参数超出允许范围。");
+            }
+        }
+
+        var sourceProfileCombo = new ComboBox
+        {
+            Header = "从另一个实例复制",
+            PlaceholderText = "选择实例",
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        foreach (var sourceProfile in ViewModel.Profiles.Where(item => item.Id != profileId))
+        {
+            sourceProfileCombo.Items.Add(new ComboBoxItem { Content = sourceProfile.Name, Tag = sourceProfile.Id });
+        }
+
+        var copySettingsButton = new Button
+        {
+            Content = "载入设置",
+            IsEnabled = sourceProfileCombo.Items.Count > 0,
+            VerticalAlignment = VerticalAlignment.Bottom
+        };
+        var exportSettingsButton = new Button { Content = "导出模板" };
+        var importSettingsButton = new Button { Content = "导入模板" };
+        var settingsTransferStatus = new TextBlock
+        {
+            Text = "模板包括内存、Java 参数和窗口设置；不会包含 Java 路径、账户选择或自定义环境变量。",
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["SakanaMutedBrush"]
+        };
+
+        copySettingsButton.Click += (_, _) =>
+        {
+            if (sourceProfileCombo.SelectedItem is not ComboBoxItem { Tag: Guid sourceId })
+            {
+                settingsTransferStatus.Text = "先选择要复制设置的实例。";
+                return;
+            }
+
+            var sourceProfile = ViewModel.Profiles.FirstOrDefault(item => item.Id == sourceId);
+            if (sourceProfile is null)
+            {
+                settingsTransferStatus.Text = "所选实例已不存在，请重新打开启动设置。";
+                return;
+            }
+
+            ApplySettingsToControls(GetEffectiveSettings(sourceProfile));
+            settingsTransferStatus.Text = $"已载入“{sourceProfile.Name}”的启动设置。点保存后应用到当前实例。";
+        };
+
+        exportSettingsButton.Click += async (_, _) =>
+        {
+            try
+            {
+                if (!double.IsFinite(minMemoryInput.Value) || !double.IsFinite(maxMemoryInput.Value) ||
+                    !double.IsFinite(widthInput.Value) || !double.IsFinite(heightInput.Value) ||
+                    minMemoryInput.Value != Math.Truncate(minMemoryInput.Value) || maxMemoryInput.Value != Math.Truncate(maxMemoryInput.Value) ||
+                    widthInput.Value != Math.Truncate(widthInput.Value) || heightInput.Value != Math.Truncate(heightInput.Value))
+                {
+                    settingsTransferStatus.Text = "请先将内存和窗口尺寸设置为整数，再导出模板。";
+                    return;
+                }
+
+                var snapshot = ReadSettingsFromControls();
+                var preset = new InstanceLaunchSettingsPreset(
+                    InstanceLaunchSettingsPreset.CurrentSchemaVersion,
+                    snapshot.UseAutomaticMemory,
+                    snapshot.MinMemoryMb,
+                    snapshot.MaxMemoryMb,
+                    snapshot.CustomJavaArguments,
+                    snapshot.Fullscreen,
+                    snapshot.WindowWidth,
+                    snapshot.WindowHeight);
+                ValidatePreset(preset);
+
+                var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(App.CurrentApp.WindowHandle);
+                var picker = new FileSavePicker(windowId)
+                {
+                    SuggestedFileName = $"{profile.Name}-启动设置",
+                    DefaultFileExtension = ".sakanlaunch",
+                    CommitButtonText = "导出设置模板"
+                };
+                picker.FileTypeChoices.Add("Sakana 启动设置模板", new List<string> { ".sakanlaunch" });
+                var destination = await picker.PickSaveFileAsync();
+                if (destination is null) return;
+
+                var json = JsonSerializer.Serialize(preset, new JsonSerializerOptions { WriteIndented = true });
+                await File.WriteAllTextAsync(destination.Path, json);
+                settingsTransferStatus.Text = $"设置模板已导出：{destination.Path}";
+            }
+            catch (Exception exception)
+            {
+                await App.CurrentApp.Logger.ErrorAsync("profile.settings_preset_export_failed", "A launch settings preset could not be exported.", exception);
+                settingsTransferStatus.Text = $"无法导出模板：{exception.Message}";
+            }
+        };
+
+        importSettingsButton.Click += async (_, _) =>
+        {
+            try
+            {
+                var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(App.CurrentApp.WindowHandle);
+                var picker = new FileOpenPicker(windowId);
+                picker.FileTypeFilter.Add(".sakanlaunch");
+                picker.CommitButtonText = "导入设置模板";
+                var selectedFile = await picker.PickSingleFileAsync();
+                if (selectedFile is null) return;
+                if (new FileInfo(selectedFile.Path).Length > 64 * 1024)
+                {
+                    throw new InvalidDataException("设置模板过大，无法导入。");
+                }
+
+                var json = await File.ReadAllTextAsync(selectedFile.Path);
+                var preset = JsonSerializer.Deserialize<InstanceLaunchSettingsPreset>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                    ?? throw new InvalidDataException("模板内容为空或格式无效。");
+                ValidatePreset(preset);
+
+                ApplySettingsToControls(new InstanceLaunchSettings(
+                    preset.UseAutomaticMemory,
+                    preset.MinMemoryMb,
+                    preset.MaxMemoryMb,
+                    currentSettings.JavaExecutablePath,
+                    preset.CustomJavaArguments ?? string.Empty,
+                    currentSettings.CustomEnvironmentVariables,
+                    preset.Fullscreen,
+                    preset.WindowWidth,
+                    preset.WindowHeight,
+                    UseGlobalSettings: false,
+                    MinecraftAccountUuid: currentSettings.MinecraftAccountUuid));
+                settingsTransferStatus.Text = $"已载入模板“{Path.GetFileName(selectedFile.Path)}”。Java 路径和环境变量保留当前实例的值；点保存后应用。";
+            }
+            catch (Exception exception)
+            {
+                await App.CurrentApp.Logger.ErrorAsync("profile.settings_preset_import_failed", "A launch settings preset could not be imported.", exception);
+                settingsTransferStatus.Text = $"无法导入模板：{exception.Message}";
+            }
+        };
+
+        var copySettingsRow = new Grid { ColumnSpacing = 8 };
+        copySettingsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        copySettingsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(copySettingsButton, 1);
+        copySettingsRow.Children.Add(sourceProfileCombo);
+        copySettingsRow.Children.Add(copySettingsButton);
+        var templateActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        templateActions.Children.Add(exportSettingsButton);
+        templateActions.Children.Add(importSettingsButton);
+        var transferActions = new StackPanel { Spacing = 8 };
+        transferActions.Children.Add(copySettingsRow);
+        transferActions.Children.Add(templateActions);
+        var transferContent = new StackPanel { Spacing = 8 };
+        transferContent.Children.Add(transferActions);
+        transferContent.Children.Add(settingsTransferStatus);
+        var transferExpander = new Expander
+        {
+            Header = "跨实例复制与分享",
+            IsExpanded = false,
+            Content = transferContent
+        };
+
+        var dialogContent = new Grid { RowSpacing = 8 };
+        dialogContent.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        dialogContent.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        dialogContent.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        dialogContent.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        Grid.SetRow(useGlobalSettingsToggle, 0);
+        Grid.SetRow(transferExpander, 1);
+        Grid.SetRow(accountSettingsPanel, 2);
+        Grid.SetRow(tabs, 3);
         dialogContent.Children.Add(useGlobalSettingsToggle);
+        dialogContent.Children.Add(transferExpander);
+        dialogContent.Children.Add(accountSettingsPanel);
         dialogContent.Children.Add(tabs);
 
         var dialog = new ContentDialog
@@ -3606,7 +4906,8 @@ public sealed partial class LibraryPage : Page
                 fullscreenToggle.IsOn,
                 (int)widthInput.Value,
                 (int)heightInput.Value,
-                useGlobalSettingsToggle.IsOn);
+                useGlobalSettingsToggle.IsOn,
+                (accountSelector.SelectedItem as ComboBoxItem)?.Tag as string);
             await ViewModel.SaveInstanceLaunchSettingsAsync(profileId, settings);
             RepairInfoBar.IsOpen = false;
             ErrorInfoBar.IsOpen = false;
@@ -3618,6 +4919,133 @@ public sealed partial class LibraryPage : Page
         }
     }
 
+    private async void LaunchSplitButton_Click(SplitButton sender, SplitButtonClickEventArgs args)
+    {
+        if (sender.Tag is Guid profileId)
+        {
+            await LaunchProfileByIdAsync(profileId);
+        }
+    }
+
+    private void QuickLaunchFlyout_Opening(object sender, object e)
+    {
+        if (sender is not MenuFlyout menu)
+        {
+            return;
+        }
+
+        if (ResolveProfileId(menu.Target) is not Guid id)
+        {
+            return;
+        }
+
+        var profile = ViewModel.Profiles.FirstOrDefault(item => item.Id == id);
+        if (profile is null)
+        {
+            return;
+        }
+
+        var busy = profile.IsRunning || profile.IsLaunching || profile.ProfileState == InstanceProfileState.Installing;
+        menu.Items.Clear();
+        menu.Items.Add(new MenuFlyoutItem { Text = "正在读取快捷目标…", IsEnabled = false });
+        if (!busy)
+        {
+            _ = PopulateQuickLaunchSplitMenuAsync(menu, id, profile.SupportsModManagement);
+        }
+    }
+
+    private static Guid? ResolveProfileId(DependencyObject? target)
+    {
+        var current = target;
+        while (current is not null)
+        {
+            if (current is FrameworkElement element)
+            {
+                if (element.Tag is Guid id)
+                {
+                    return id;
+                }
+
+                if (element.DataContext is InstanceCardViewModel card)
+                {
+                    return card.Id;
+                }
+            }
+
+            current = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
+    }
+
+    private async Task PopulateQuickLaunchSplitMenuAsync(MenuFlyout menu, Guid profileId, bool supportsModManagement)
+    {
+        try
+        {
+            var worlds = await ViewModel.ListMinecraftWorldsAsync(profileId);
+            var pinnedServers = (await ViewModel.ListServerBookmarksAsync(profileId))
+                .Where(server => server.IsPinned)
+                .ToArray();
+
+            menu.Items.Clear();
+            var addedTarget = false;
+            foreach (var worldName in worlds.Take(6))
+            {
+                var item = new MenuFlyoutItem { Text = $"直达世界 · {worldName}" };
+                item.Click += async (_, _) => await LaunchProfileWithQuickPlayAsync(
+                    profileId,
+                    new MinecraftQuickPlayTarget(MinecraftQuickPlayKind.SingleplayerWorld, worldName));
+                menu.Items.Add(item);
+                addedTarget = true;
+            }
+
+            foreach (var server in pinnedServers.Take(6))
+            {
+                var item = new MenuFlyoutItem { Text = $"直达服务器 · {server.Name}" };
+                item.Click += async (_, _) => await LaunchProfileWithQuickPlayAsync(
+                    profileId,
+                    new MinecraftQuickPlayTarget(MinecraftQuickPlayKind.MultiplayerServer, server.Address));
+                menu.Items.Add(item);
+                addedTarget = true;
+            }
+
+            if (!addedTarget)
+            {
+                menu.Items.Add(new MenuFlyoutItem { Text = "暂无直达世界或置顶服务器", IsEnabled = false });
+            }
+
+            menu.Items.Add(new MenuFlyoutSeparator());
+
+            var worldsItem = new MenuFlyoutItem { Text = "管理世界与服务器…", Tag = profileId };
+            worldsItem.Click += ManageWorldsAndServers_Click;
+            menu.Items.Add(worldsItem);
+
+            if (supportsModManagement)
+            {
+                var modsItem = new MenuFlyoutItem { Text = "管理模组…", Tag = profileId };
+                modsItem.Click += ManageMods_Click;
+                menu.Items.Add(modsItem);
+            }
+
+            var settingsItem = new MenuFlyoutItem { Text = "启动与内存设置…", Tag = profileId };
+            settingsItem.Click += LaunchSettings_Click;
+            menu.Items.Add(settingsItem);
+
+            var folderItem = new MenuFlyoutItem { Text = "打开实例文件夹", Tag = profileId };
+            folderItem.Click += OpenInstanceFolder_Click;
+            menu.Items.Add(folderItem);
+        }
+        catch (Exception exception)
+        {
+            menu.Items.Clear();
+            menu.Items.Add(new MenuFlyoutItem { Text = "快捷目标读取失败", IsEnabled = false });
+            var worldsItem = new MenuFlyoutItem { Text = "管理世界与服务器…", Tag = profileId };
+            worldsItem.Click += ManageWorldsAndServers_Click;
+            menu.Items.Add(worldsItem);
+            await App.CurrentApp.Logger.ErrorAsync("quick_play.targets_load_failed", "Could not load the quick launch targets for an instance.", exception);
+        }
+    }
+
     private async void LaunchProfile_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement { Tag: Guid profileId })
@@ -3625,9 +5053,15 @@ public sealed partial class LibraryPage : Page
             return;
         }
 
+        await LaunchProfileByIdAsync(profileId);
+    }
+
+    private async Task LaunchProfileByIdAsync(Guid profileId)
+    {
         ErrorInfoBar.IsOpen = false;
         try
         {
+            if (!await ConfirmLaunchMemoryIfNeededAsync(profileId)) return;
             await ViewModel.LaunchProfileAsync(profileId);
         }
         catch (MinecraftAccountRequiredException exception)
@@ -3666,4 +5100,85 @@ public sealed partial class LibraryPage : Page
         ErrorInfoBar.Message = string.IsNullOrWhiteSpace(details) ? message : $"{message} {details}";
         ErrorInfoBar.IsOpen = true;
     }
+
+    private async Task<bool> ConfirmLaunchMemoryIfNeededAsync(Guid profileId)
+    {
+        var profile = ViewModel.Profiles.FirstOrDefault(item => item.Id == profileId);
+        if (profile is null || profile.UseAutomaticMemory || !TryGetPhysicalMemory(out var memory))
+        {
+            return true;
+        }
+
+        var availableMb = (long)(memory.AvailablePhysicalBytes / (1024UL * 1024UL));
+        var totalMb = (long)(memory.TotalPhysicalBytes / (1024UL * 1024UL));
+        var recommendedMaxMb = (int)Math.Clamp(availableMb / 2, 1024, 16384);
+        if (profile.MaxMemoryMb <= recommendedMaxMb && profile.MaxMemoryMb <= availableMb)
+        {
+            return true;
+        }
+
+        var javaRuntime = string.IsNullOrWhiteSpace(profile.EffectiveJavaExecutablePath)
+            ? "按 Minecraft 版本自动匹配；缺少兼容版本时会按需下载"
+            : profile.EffectiveJavaExecutablePath;
+        var dialog = new ContentDialog
+        {
+            Title = "此实例的内存上限偏高",
+            Content = new TextBlock
+            {
+                Text = $"系统物理内存：{FormatMemory(totalMb)}；当前可用：{FormatMemory(availableMb)}。按当前可用内存估算，建议 Java 最大堆不超过 {FormatMemory(recommendedMaxMb)}；此实例设置为 {FormatMemory(profile.MaxMemoryMb)}。Java 堆之外还需要给 Windows、显卡和其他程序留出内存。\n\nJava 运行时：{javaRuntime}\n\n继续启动可能造成系统变慢或游戏启动失败。",
+                TextWrapping = TextWrapping.Wrap
+            },
+            PrimaryButtonText = "仍然启动",
+            CloseButtonText = "取消启动",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return false;
+        }
+
+        await App.CurrentApp.Logger.InformationAsync(
+            "profile.launch_memory_warning_acknowledged",
+            $"The user continued launching profile {profileId} with a configured Java heap of {profile.MaxMemoryMb} MB, above the estimated recommendation of {recommendedMaxMb} MB.");
+        return true;
+    }
+
+    private static string FormatMemory(long megabytes) =>
+        megabytes >= 1024
+            ? $"{megabytes / 1024d:F1} GB ({megabytes:N0} MB)"
+            : $"{megabytes:N0} MB";
+
+    private static bool TryGetPhysicalMemory(out PhysicalMemoryStatus status)
+    {
+        status = new PhysicalMemoryStatus { Length = (uint)Marshal.SizeOf<PhysicalMemoryStatus>() };
+        if (!OperatingSystem.IsWindows() || !GlobalMemoryStatusEx(ref status) ||
+            status.TotalPhysicalBytes == 0 || status.AvailablePhysicalBytes == 0)
+        {
+            status = default;
+            return false;
+        }
+
+        return true;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PhysicalMemoryStatus
+    {
+        public uint Length;
+        public uint MemoryLoad;
+        public ulong TotalPhysicalBytes;
+        public ulong AvailablePhysicalBytes;
+        public ulong TotalPageFileBytes;
+        public ulong AvailablePageFileBytes;
+        public ulong TotalVirtualBytes;
+        public ulong AvailableVirtualBytes;
+        public ulong AvailableExtendedVirtualBytes;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref PhysicalMemoryStatus buffer);
 }

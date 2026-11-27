@@ -14,6 +14,15 @@ public partial class App : Microsoft.UI.Xaml.Application
     public App()
     {
         InitializeComponent();
+        UnhandledException += OnAppUnhandledException;
+    }
+
+    private void OnAppUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    {
+        if (Logger is not null)
+        {
+            _ = Logger.ErrorAsync("app.unhandled_exception", e.Message, e.Exception);
+        }
     }
 
     public static App CurrentApp => (App)Current;
@@ -23,6 +32,8 @@ public partial class App : Microsoft.UI.Xaml.Application
     public ISakanaLogger Logger { get; private set; } = null!;
 
     public IMinecraftAccountService MinecraftAccountService { get; private set; } = null!;
+
+    public ICurseForgeApiKeyStore CurseForgeApiKeyStore { get; private set; } = null!;
 
     public IntPtr WindowHandle => _window is null ? IntPtr.Zero : WinRT.Interop.WindowNative.GetWindowHandle(_window);
 
@@ -38,30 +49,35 @@ public partial class App : Microsoft.UI.Xaml.Application
     {
         var store = new SqliteLauncherStore();
         Logger = new JsonFileSakanaLogger(store.DataDirectory);
+        var downloadConcurrencyOptions = new DownloadConcurrencyOptions();
         _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
         _httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("Sakana", "0.1"));
         var metadataClient = new MojangMetadataClient(_httpClient, store.DataDirectory);
         var fabricLoaderCatalog = new FabricMetaClient(_httpClient);
         var quiltLoaderCatalog = new QuiltMetaClient(_httpClient);
         var forgeNeoForgeLoaderCatalog = new ForgeNeoForgeMetaClient(_httpClient);
-        var javaRuntimeManager = new MojangJavaRuntimeManager(_httpClient, store.DataDirectory);
-        var modrinthModpackService = new ModrinthModpackService(_httpClient);
+        var javaRuntimeManager = new MojangJavaRuntimeManager(_httpClient, store.DataDirectory, downloadConcurrencyOptions);
+        var modrinthModpackService = new ModrinthModpackService(_httpClient, downloadConcurrencyOptions);
+        CurseForgeApiKeyStore = new WindowsDpapiCurseForgeApiKeyStore(store.DataDirectory);
+        var curseForgeModpackService = new CurseForgeModpackService(_httpClient, CurseForgeApiKeyStore, downloadConcurrencyOptions);
         var localModService = new LocalFabricModService(store.DataDirectory);
         var localPackService = new LocalMinecraftPackService(store.DataDirectory);
         var localMinecraftWorldService = new LocalMinecraftWorldService(store.DataDirectory);
         var localMinecraftServerService = new LocalMinecraftServerService(store.DataDirectory);
-        var modrinthModCatalog = new ModrinthModCatalog(_httpClient, store.DataDirectory, localModService, localPackService);
-        var installer = new MinecraftInstaller(_httpClient, store.DataDirectory, metadataClient, fabricLoaderCatalog, quiltLoaderCatalog, forgeNeoForgeLoaderCatalog, javaRuntimeManager, modrinthModpackService);
+        var minecraftServerStatusService = new MinecraftServerStatusService();
+        var modrinthModCatalog = new ModrinthModCatalog(_httpClient, store.DataDirectory, localModService, localPackService, downloadConcurrencyOptions);
+        var installer = new MinecraftInstaller(_httpClient, store.DataDirectory, metadataClient, fabricLoaderCatalog, quiltLoaderCatalog, forgeNeoForgeLoaderCatalog, javaRuntimeManager, modrinthModpackService, curseForgeModpackService, downloadConcurrencyOptions);
         var launchPlanner = new MinecraftLaunchPlanner(store.DataDirectory, metadataClient, javaRuntimeManager);
         var credentialStore = new WindowsDpapiMicrosoftCredentialStore(store.DataDirectory);
         MinecraftAccountService = new MicrosoftMinecraftAccountService(_httpClient, credentialStore);
-        LauncherService = new LauncherService(store, metadataClient, fabricLoaderCatalog, quiltLoaderCatalog, forgeNeoForgeLoaderCatalog, modrinthModpackService, modrinthModCatalog, localModService, localPackService, localMinecraftWorldService, localMinecraftServerService, javaRuntimeManager, installer, launchPlanner, new MinecraftProcessRunner(), Logger);
+        LauncherService = new LauncherService(store, metadataClient, fabricLoaderCatalog, quiltLoaderCatalog, forgeNeoForgeLoaderCatalog, modrinthModpackService, curseForgeModpackService, modrinthModCatalog, localModService, localPackService, localMinecraftWorldService, localMinecraftServerService, minecraftServerStatusService, javaRuntimeManager, installer, launchPlanner, new MinecraftProcessRunner(), Logger, downloadConcurrencyOptions);
         var settings = Sakana.Domain.LauncherSettings.Default;
 
         try
         {
             await LauncherService.InitializeAsync();
             settings = await LauncherService.GetSettingsAsync();
+            downloadConcurrencyOptions.MaxConcurrentDownloads = settings.MaxConcurrentDownloads;
             await Logger.InformationAsync("app.started", "Sakana Launcher started.");
         }
         catch (Exception exception)

@@ -2,8 +2,17 @@ using System.Collections.ObjectModel;
 using Sakana.Application;
 using Sakana.Domain;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
 
 namespace Sakana.App.ViewModels;
+
+public sealed record HomeInstanceSummary(
+    Guid Id,
+    string Name,
+    string VersionLabel,
+    string StateLabel,
+    Visibility ReadyVisibility,
+    Visibility PendingVisibility);
 
 public sealed class HomeViewModel : ViewModelBase, IDisposable
 {
@@ -11,6 +20,7 @@ public sealed class HomeViewModel : ViewModelBase, IDisposable
     private readonly DispatcherQueue _dispatcherQueue;
     private bool _hasProfiles;
     private string _profileCountText = "你的实例配置会显示在这里。";
+    private string _readySummaryText = "创建或导入实例后即可快速启动。";
     private bool _disposed;
 
     public HomeViewModel(ILauncherService launcherService, DispatcherQueue dispatcherQueue)
@@ -21,6 +31,7 @@ public sealed class HomeViewModel : ViewModelBase, IDisposable
     }
 
     public ObservableCollection<InstanceProfile> Profiles { get; } = [];
+    public ObservableCollection<HomeInstanceSummary> ProfileSummaries { get; } = [];
     public ObservableCollection<LaunchHistoryCardViewModel> RecentLaunches { get; } = [];
     public ObservableCollection<ActiveGameProcessViewModel> ActiveProcesses { get; } = [];
 
@@ -46,18 +57,67 @@ public sealed class HomeViewModel : ViewModelBase, IDisposable
         }
     }
 
+    public string ReadySummaryText
+    {
+        get => _readySummaryText;
+        private set
+        {
+            if (_readySummaryText == value) return;
+            _readySummaryText = value;
+            OnPropertyChanged();
+        }
+    }
+
     public async Task RefreshAsync(CancellationToken cancellationToken = default)
     {
         Profiles.Clear();
-        foreach (var profile in await _launcherService.ListProfilesAsync(cancellationToken))
+        ProfileSummaries.Clear();
+        var listed = await _launcherService.ListProfilesAsync(cancellationToken);
+        var readyCount = 0;
+
+        foreach (var profile in listed)
         {
             Profiles.Add(profile);
+            var isReady = profile.State == InstanceProfileState.Installed;
+            if (isReady)
+            {
+                readyCount++;
+            }
+
+            var versionLabel = profile.LoaderType switch
+            {
+                MinecraftLoaderType.Fabric => $"Minecraft {profile.VersionId} · Fabric",
+                MinecraftLoaderType.Quilt => $"Minecraft {profile.VersionId} · Quilt",
+                MinecraftLoaderType.Forge => $"Minecraft {profile.VersionId} · Forge",
+                MinecraftLoaderType.NeoForge => $"Minecraft {profile.VersionId} · NeoForge",
+                _ => $"Minecraft {profile.VersionId}"
+            };
+
+            var stateLabel = profile.State switch
+            {
+                InstanceProfileState.Installed => "环境已就绪",
+                InstanceProfileState.Installing => "正在安装",
+                InstanceProfileState.Failed => "安装失败",
+                InstanceProfileState.Cancelled => "已取消",
+                _ => "配置待安装"
+            };
+
+            ProfileSummaries.Add(new HomeInstanceSummary(
+                profile.Id,
+                profile.Name,
+                versionLabel,
+                stateLabel,
+                isReady ? Visibility.Visible : Visibility.Collapsed,
+                isReady ? Visibility.Collapsed : Visibility.Visible));
         }
 
         HasProfiles = Profiles.Count > 0;
         ProfileCountText = HasProfiles
             ? $"共 {Profiles.Count} 个实例配置"
             : "你的实例配置会显示在这里。";
+        ReadySummaryText = HasProfiles
+            ? $"{readyCount} / {Profiles.Count} 个实例已安装就绪，可在实例库直接启动。"
+            : "创建或导入实例后，可在实例库一键管理与启动。";
 
         ActiveProcesses.Clear();
         foreach (var process in _launcherService.GetActiveGameProcesses())

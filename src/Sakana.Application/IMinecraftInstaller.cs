@@ -4,7 +4,7 @@ namespace Sakana.Application;
 
 public interface IMinecraftInstaller
 {
-    Task InstallAsync(
+    Task<IReadOnlyList<CurseForgeManualDownload>> InstallAsync(
         InstanceProfile profile,
         IProgress<InstallationProgress>? progress = null,
         CancellationToken cancellationToken = default,

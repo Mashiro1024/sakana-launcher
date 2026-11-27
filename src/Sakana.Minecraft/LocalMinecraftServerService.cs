@@ -25,22 +25,14 @@ public sealed class LocalMinecraftServerService(string dataDirectory) : ILocalMi
         var items = await JsonSerializer.DeserializeAsync<List<MinecraftServerBookmark>>(stream, JsonOptions, cancellationToken) ?? [];
         return items
             .Where(item => item.Id != Guid.Empty && !string.IsNullOrWhiteSpace(item.Name) && TryNormalizeAddress(item.Address, out _))
-            .OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
+            .OrderByDescending(item => item.IsPinned)
+            .ThenBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
             .ToArray();
     }
 
     public async Task<MinecraftServerBookmark> AddAsync(string instanceDirectoryName, string name, string address, CancellationToken cancellationToken = default)
     {
-        var normalizedName = (name ?? string.Empty).Trim();
-        if (normalizedName.Length is < 1 or > 80 || normalizedName.Any(char.IsControl))
-        {
-            throw new ArgumentException("服务器名称需为 1–80 个字符。", nameof(name));
-        }
-
-        if (!TryNormalizeAddress(address, out var normalizedAddress))
-        {
-            throw new ArgumentException("输入服务器域名或 IP，可选填写端口，例如 play.example.net:25565。", nameof(address));
-        }
+        var (normalizedName, normalizedAddress) = NormalizeBookmark(name, address);
 
         var path = GetStorePath(instanceDirectoryName);
         var items = (await ListAsync(instanceDirectoryName, cancellationToken)).ToList();
@@ -53,6 +45,54 @@ public sealed class LocalMinecraftServerService(string dataDirectory) : ILocalMi
         items.Add(bookmark);
         await SaveAsync(path, items, cancellationToken);
         return bookmark;
+    }
+
+    public async Task<MinecraftServerBookmark> UpdateAsync(
+        string instanceDirectoryName,
+        Guid bookmarkId,
+        string name,
+        string address,
+        CancellationToken cancellationToken = default)
+    {
+        if (bookmarkId == Guid.Empty)
+        {
+            throw new ArgumentException("Choose a valid saved server.", nameof(bookmarkId));
+        }
+
+        var (normalizedName, normalizedAddress) = NormalizeBookmark(name, address);
+        var path = GetStorePath(instanceDirectoryName);
+        var items = (await ListAsync(instanceDirectoryName, cancellationToken)).ToList();
+        var index = items.FindIndex(item => item.Id == bookmarkId);
+        if (index < 0)
+        {
+            throw new KeyNotFoundException("This saved server no longer exists. Refresh the list and try again.");
+        }
+
+        if (items.Any(item => item.Id != bookmarkId && string.Equals(item.Address, normalizedAddress, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException("这个服务器地址已经收藏。可在列表中直接快速启动。");
+        }
+
+        var updated = items[index] with { Name = normalizedName, Address = normalizedAddress };
+        items[index] = updated;
+        await SaveAsync(path, items, cancellationToken);
+        return updated;
+    }
+
+    public async Task SetPinnedAsync(string instanceDirectoryName, Guid bookmarkId, bool isPinned, CancellationToken cancellationToken = default)
+    {
+        var path = GetStorePath(instanceDirectoryName);
+        var items = (await ListAsync(instanceDirectoryName, cancellationToken)).ToList();
+        var index = items.FindIndex(item => item.Id == bookmarkId);
+        if (index < 0)
+        {
+            throw new KeyNotFoundException("This saved server no longer exists. Refresh the list and try again.");
+        }
+
+        if (items[index].IsPinned == isPinned) return;
+
+        items[index] = items[index] with { IsPinned = isPinned };
+        await SaveAsync(path, items, cancellationToken);
     }
 
     public async Task RemoveAsync(string instanceDirectoryName, Guid bookmarkId, CancellationToken cancellationToken = default)
@@ -85,6 +125,22 @@ public sealed class LocalMinecraftServerService(string dataDirectory) : ILocalMi
         }
 
         File.Move(temporaryPath, path, overwrite: true);
+    }
+
+    private static (string Name, string Address) NormalizeBookmark(string name, string address)
+    {
+        var normalizedName = (name ?? string.Empty).Trim();
+        if (normalizedName.Length is < 1 or > 80 || normalizedName.Any(char.IsControl))
+        {
+            throw new ArgumentException("服务器名称需为 1–80 个字符。", nameof(name));
+        }
+
+        if (!TryNormalizeAddress(address, out var normalizedAddress))
+        {
+            throw new ArgumentException("输入服务器域名或 IP，可选填写端口，例如 play.example.net:25565。", nameof(address));
+        }
+
+        return (normalizedName, normalizedAddress);
     }
 
     private static bool TryNormalizeAddress(string? address, out string normalizedAddress)

@@ -74,7 +74,7 @@ public sealed class SqliteLauncherStore : ILauncherStore
 
             command.CommandText = "PRAGMA user_version;";
             var schemaVersion = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
-            if (schemaVersion > 13)
+            if (schemaVersion > 14)
             {
                 throw new InvalidOperationException($"Sakana database version {schemaVersion} is newer than this app supports.");
             }
@@ -270,6 +270,18 @@ public sealed class SqliteLauncherStore : ILauncherStore
                 schemaVersion = 13;
             }
 
+            if (schemaVersion == 13)
+            {
+                command.CommandText = """
+                    BEGIN IMMEDIATE;
+                    ALTER TABLE InstanceProfiles ADD COLUMN MinecraftAccountUuid TEXT NULL;
+                    PRAGMA user_version = 14;
+                    COMMIT;
+                    """;
+                await command.ExecuteNonQueryAsync(cancellationToken);
+                schemaVersion = 14;
+            }
+
             _initialized = true;
         }
         finally
@@ -283,10 +295,12 @@ public sealed class SqliteLauncherStore : ILauncherStore
         await EnsureInitializedAsync(cancellationToken);
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT Key, Value FROM AppSettings WHERE Key IN ('Theme', 'GlobalLaunchSettings');";
+        command.CommandText = "SELECT Key, Value FROM AppSettings WHERE Key IN ('Theme', 'GlobalLaunchSettings', 'MaxConcurrentDownloads', 'LibraryViewPresets');";
 
         string? themeValue = null;
         GlobalLaunchSettings? globalLaunchSettings = null;
+        var maxConcurrentDownloads = LauncherSettings.Default.MaxConcurrentDownloads;
+        IReadOnlyList<LibraryViewPreset> libraryViewPresets = [];
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
@@ -306,13 +320,42 @@ public sealed class SqliteLauncherStore : ILauncherStore
                         globalLaunchSettings = null;
                     }
                 }
+                else if (reader.GetString(0) == "MaxConcurrentDownloads" &&
+                         int.TryParse(reader.GetString(1), out var parsedConcurrency) &&
+                         parsedConcurrency is >= 1 and <= 256)
+                {
+                    maxConcurrentDownloads = parsedConcurrency;
+                }
+                else if (reader.GetString(0) == "LibraryViewPresets")
+                {
+                    try
+                    {
+                        libraryViewPresets = (JsonSerializer.Deserialize<List<LibraryViewPreset>>(reader.GetString(1)) ?? [])
+                            .Where(preset => preset is not null &&
+                                             !string.IsNullOrWhiteSpace(preset.Name) &&
+                                             preset.Name.Length <= 50 &&
+                                             preset.SearchQuery is not null &&
+                                             preset.SearchQuery.Length <= 200 &&
+                                             preset.SortOrder is "created-desc" or "name-asc" or "name-desc" or "version-desc")
+                            .Take(30)
+                            .ToArray();
+                    }
+                    catch (JsonException)
+                    {
+                        libraryViewPresets = [];
+                    }
+                }
             }
         }
 
         var theme = Enum.TryParse<ThemePreference>(themeValue, ignoreCase: true, out var parsedTheme)
             ? parsedTheme
             : LauncherSettings.Default.Theme;
-        return new LauncherSettings(theme, globalLaunchSettings ?? GlobalLaunchSettings.Default);
+        return new LauncherSettings(theme, globalLaunchSettings ?? GlobalLaunchSettings.Default)
+        {
+            MaxConcurrentDownloads = maxConcurrentDownloads,
+            LibraryViewPresets = libraryViewPresets
+        };
     }
 
     public async Task SaveSettingsAsync(LauncherSettings settings, CancellationToken cancellationToken = default)
@@ -325,9 +368,15 @@ public sealed class SqliteLauncherStore : ILauncherStore
             ON CONFLICT(Key) DO UPDATE SET Value = excluded.Value;
             INSERT INTO AppSettings (Key, Value) VALUES ('GlobalLaunchSettings', $launchSettings)
             ON CONFLICT(Key) DO UPDATE SET Value = excluded.Value;
+            INSERT INTO AppSettings (Key, Value) VALUES ('MaxConcurrentDownloads', $maxConcurrentDownloads)
+            ON CONFLICT(Key) DO UPDATE SET Value = excluded.Value;
+            INSERT INTO AppSettings (Key, Value) VALUES ('LibraryViewPresets', $libraryViewPresets)
+            ON CONFLICT(Key) DO UPDATE SET Value = excluded.Value;
             """;
         command.Parameters.AddWithValue("$theme", settings.Theme.ToString());
         command.Parameters.AddWithValue("$launchSettings", JsonSerializer.Serialize(settings.GlobalLaunchSettings));
+        command.Parameters.AddWithValue("$maxConcurrentDownloads", Math.Clamp(settings.MaxConcurrentDownloads, 1, 256).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$libraryViewPresets", JsonSerializer.Serialize(settings.LibraryViewPresets));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -346,7 +395,7 @@ public sealed class SqliteLauncherStore : ILauncherStore
         command.CommandText = """
             SELECT Id, Name, VersionId, State, CreatedAtUtc, LastError, MinMemoryMb, MaxMemoryMb, LoaderType, LoaderVersion, ModrinthPackPath, ModrinthSelectedOptionalFilesJson,
                    UseAutomaticMemory, JavaExecutablePath, CustomJavaArguments, CustomEnvironmentVariablesJson, Fullscreen, WindowWidth, WindowHeight, UseGlobalLaunchSettings,
-                   ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber, GroupName, TagsJson, IconFileName
+                   ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber, GroupName, TagsJson, IconFileName, MinecraftAccountUuid, CurseForgePackPath
             FROM InstanceProfiles
             ORDER BY CreatedAtUtc DESC;
             """;
@@ -369,7 +418,7 @@ public sealed class SqliteLauncherStore : ILauncherStore
         command.CommandText = """
             SELECT Id, Name, VersionId, State, CreatedAtUtc, LastError, MinMemoryMb, MaxMemoryMb, LoaderType, LoaderVersion, ModrinthPackPath, ModrinthSelectedOptionalFilesJson,
                    UseAutomaticMemory, JavaExecutablePath, CustomJavaArguments, CustomEnvironmentVariablesJson, Fullscreen, WindowWidth, WindowHeight, UseGlobalLaunchSettings,
-                   ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber, GroupName, TagsJson, IconFileName
+                   ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber, GroupName, TagsJson, IconFileName, MinecraftAccountUuid, CurseForgePackPath
             FROM InstanceProfiles
             WHERE Id = $id;
             """;
@@ -413,7 +462,8 @@ public sealed class SqliteLauncherStore : ILauncherStore
                 UseAutomaticMemory = $useAutomaticMemory, JavaExecutablePath = $javaExecutablePath,
                 CustomJavaArguments = $customJavaArguments, CustomEnvironmentVariablesJson = $customEnvironmentVariablesJson,
                 Fullscreen = $fullscreen, WindowWidth = $windowWidth, WindowHeight = $windowHeight,
-                UseGlobalLaunchSettings = $useGlobalSettings
+                UseGlobalLaunchSettings = $useGlobalSettings,
+                MinecraftAccountUuid = $minecraftAccountUuid
             WHERE Id = $id;
             """;
         command.Parameters.AddWithValue("$minMemoryMb", settings.MinMemoryMb);
@@ -426,6 +476,7 @@ public sealed class SqliteLauncherStore : ILauncherStore
         command.Parameters.AddWithValue("$windowWidth", settings.WindowWidth);
         command.Parameters.AddWithValue("$windowHeight", settings.WindowHeight);
         command.Parameters.AddWithValue("$useGlobalSettings", settings.UseGlobalSettings ? 1 : 0);
+        command.Parameters.AddWithValue("$minecraftAccountUuid", (object?)settings.MinecraftAccountUuid ?? DBNull.Value);
         command.Parameters.AddWithValue("$id", profileId.ToString("D"));
         if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
         {
@@ -452,8 +503,8 @@ public sealed class SqliteLauncherStore : ILauncherStore
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT INTO InstanceProfiles (Id, Name, VersionId, State, CreatedAtUtc, MinMemoryMb, MaxMemoryMb, LoaderType, LoaderVersion, ModrinthPackPath, ModrinthSelectedOptionalFilesJson, UseGlobalLaunchSettings, ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber, GroupName, TagsJson, IconFileName)
-            VALUES ($id, $name, $version, $state, $created, $minMemoryMb, $maxMemoryMb, $loaderType, $loaderVersion, $modrinthPackPath, $modrinthSelectedOptionalFilesJson, $useGlobalSettings, $modrinthProjectId, $modrinthPackVersionId, $modrinthPackVersionNumber, $groupName, $tagsJson, $iconFileName)
+            INSERT INTO InstanceProfiles (Id, Name, VersionId, State, CreatedAtUtc, MinMemoryMb, MaxMemoryMb, LoaderType, LoaderVersion, ModrinthPackPath, ModrinthSelectedOptionalFilesJson, UseGlobalLaunchSettings, ModrinthProjectId, ModrinthPackVersionId, ModrinthPackVersionNumber, GroupName, TagsJson, IconFileName, CurseForgePackPath)
+            VALUES ($id, $name, $version, $state, $created, $minMemoryMb, $maxMemoryMb, $loaderType, $loaderVersion, $modrinthPackPath, $modrinthSelectedOptionalFilesJson, $useGlobalSettings, $modrinthProjectId, $modrinthPackVersionId, $modrinthPackVersionNumber, $groupName, $tagsJson, $iconFileName, $curseForgePackPath)
             ON CONFLICT(Name) DO NOTHING;
             """;
         command.Parameters.AddWithValue("$id", profile.Id.ToString("D"));
@@ -474,6 +525,7 @@ public sealed class SqliteLauncherStore : ILauncherStore
         command.Parameters.AddWithValue("$groupName", (object?)profile.GroupName ?? DBNull.Value);
         command.Parameters.AddWithValue("$tagsJson", profile.TagsJson);
         command.Parameters.AddWithValue("$iconFileName", (object?)profile.IconFileName ?? DBNull.Value);
+        command.Parameters.AddWithValue("$curseForgePackPath", (object?)profile.CurseForgePackPath ?? DBNull.Value);
 
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
     }
@@ -706,7 +758,9 @@ public sealed class SqliteLauncherStore : ILauncherStore
         reader.IsDBNull(22) ? null : reader.GetString(22),
         reader.IsDBNull(23) ? null : reader.GetString(23),
         reader.GetString(24),
-        reader.IsDBNull(25) ? null : reader.GetString(25));
+        reader.IsDBNull(25) ? null : reader.GetString(25),
+        reader.IsDBNull(26) ? null : reader.GetString(26),
+        reader.IsDBNull(27) ? null : reader.GetString(27));
 
     private static string FormatUtc(DateTimeOffset timestamp) =>
         timestamp.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture);

@@ -13,8 +13,14 @@ public interface ILauncherService
     Task InitializeAsync(CancellationToken cancellationToken = default);
     Task<LauncherSettings> GetSettingsAsync(CancellationToken cancellationToken = default);
     Task SaveThemeAsync(ThemePreference theme, CancellationToken cancellationToken = default);
+    Task SaveMaxConcurrentDownloadsAsync(int maxConcurrentDownloads, CancellationToken cancellationToken = default);
     Task SaveGlobalLaunchSettingsAsync(GlobalLaunchSettings settings, CancellationToken cancellationToken = default);
+    Task SaveLibraryViewPresetsAsync(IReadOnlyList<LibraryViewPreset> presets, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<JavaInstallation>> DetectJavaInstallationsAsync(CancellationToken cancellationToken = default);
+    Task<JavaInstallation> InstallJavaRuntimeAsync(
+        int majorVersion,
+        IProgress<InstallationProgress>? progress = null,
+        CancellationToken cancellationToken = default);
     Task<IReadOnlyList<InstanceProfile>> ListProfilesAsync(CancellationToken cancellationToken = default);
     Task<InstanceProfile> DuplicateProfileAsync(
         Guid profileId,
@@ -27,10 +33,12 @@ public interface ILauncherService
     Task<bool> DeleteProfileAsync(Guid profileId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MinecraftLaunchHistoryEntry>> GetLaunchHistoryAsync(int limit = 20, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MinecraftGameVersion>> GetReleaseVersionsAsync(CancellationToken cancellationToken = default);
+    Task<bool> SupportsQuickPlayAsync(string minecraftVersionId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MinecraftLoaderVersion>> GetFabricLoaderVersionsAsync(string minecraftVersionId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MinecraftLoaderVersion>> GetQuiltLoaderVersionsAsync(string minecraftVersionId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MinecraftLoaderVersion>> GetForgeNeoForgeLoaderVersionsAsync(MinecraftLoaderType loaderType, string minecraftVersionId, CancellationToken cancellationToken = default);
     Task<ModrinthModpackDescription> InspectModrinthPackAsync(string archivePath, CancellationToken cancellationToken = default);
+    Task<CurseForgeModpackDescription> InspectCurseForgePackAsync(string archivePath, CancellationToken cancellationToken = default);
     Task<ModrinthModpackUpdatePreview> PreviewModrinthPackUpdateAsync(Guid profileId, string newArchivePath, string newVersionNumber, CancellationToken cancellationToken = default);
     Task<ModrinthModpackUpdateResult> ApplyModrinthPackUpdateAsync(Guid profileId, string newArchivePath, string newVersionId, string newVersionNumber, IReadOnlyCollection<string> replaceConflictPaths, CancellationToken cancellationToken = default);
     Task<ModrinthModpackExportResult> ExportModrinthPackAsync(Guid profileId, string destinationPath, CancellationToken cancellationToken = default);
@@ -42,7 +50,18 @@ public interface ILauncherService
         string? modrinthProjectId = null,
         string? modrinthVersionId = null,
         string? modrinthVersionNumber = null);
-    Task<ModrinthProjectSearchPage> SearchModrinthModpacksAsync(string query, string sortOrder, int offset, CancellationToken cancellationToken = default);
+    Task<InstanceProfile> ImportCurseForgePackAsync(
+        string archivePath,
+        string instanceName,
+        IReadOnlyCollection<string> selectedOptionalFiles,
+        CancellationToken cancellationToken = default);
+    Task<ModrinthProjectSearchPage> SearchModrinthModpacksAsync(
+        string query,
+        string sortOrder,
+        int offset,
+        CancellationToken cancellationToken = default,
+        string? gameVersion = null,
+        string? loader = null);
     Task<IReadOnlyList<ModrinthModRelease>> GetSupportedModrinthModpackVersionsAsync(string projectId, CancellationToken cancellationToken = default);
     Task<string> DownloadModrinthModpackVersionAsync(string versionId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MinecraftModFile>> ListLocalModsAsync(Guid profileId, CancellationToken cancellationToken = default);
@@ -65,7 +84,10 @@ public interface ILauncherService
     Task SetLocalModEnabledAsync(Guid profileId, string fileName, bool isEnabled, CancellationToken cancellationToken = default);
     Task RemoveLocalModAsync(Guid profileId, string fileName, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MinecraftServerBookmark>> ListServerBookmarksAsync(Guid profileId, CancellationToken cancellationToken = default);
+    Task<MinecraftServerStatus> GetServerBookmarkStatusAsync(Guid profileId, Guid bookmarkId, CancellationToken cancellationToken = default);
     Task<MinecraftServerBookmark> AddServerBookmarkAsync(Guid profileId, string name, string address, CancellationToken cancellationToken = default);
+    Task<MinecraftServerBookmark> UpdateServerBookmarkAsync(Guid profileId, Guid bookmarkId, string name, string address, CancellationToken cancellationToken = default);
+    Task SetServerBookmarkPinnedAsync(Guid profileId, Guid bookmarkId, bool isPinned, CancellationToken cancellationToken = default);
     Task RemoveServerBookmarkAsync(Guid profileId, Guid bookmarkId, CancellationToken cancellationToken = default);
     Task<InstanceProfile> CreateProfileAsync(
         string name,
@@ -75,8 +97,8 @@ public interface ILauncherService
         CancellationToken cancellationToken = default);
     Task<InstanceProfile> SaveInstanceMemoryAsync(Guid profileId, int minMemoryMb, int maxMemoryMb, CancellationToken cancellationToken = default);
     Task<InstanceProfile> SaveInstanceLaunchSettingsAsync(Guid profileId, InstanceLaunchSettings settings, CancellationToken cancellationToken = default);
-    Task InstallProfileAsync(Guid profileId, CancellationToken cancellationToken = default);
-    Task RepairProfileAsync(Guid profileId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<CurseForgeManualDownload>> InstallProfileAsync(Guid profileId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<CurseForgeManualDownload>> RepairProfileAsync(Guid profileId, CancellationToken cancellationToken = default);
     Task<MinecraftLaunchPlan> PrepareLaunchPlanAsync(Guid profileId, MinecraftAccountSession session, CancellationToken cancellationToken = default, MinecraftQuickPlayTarget? quickPlayTarget = null);
     Task<IMinecraftGameProcess> LaunchGameAsync(Guid profileId, MinecraftAccountSession session, CancellationToken cancellationToken = default, MinecraftQuickPlayTarget? quickPlayTarget = null);
     Task StopGameAsync(Guid profileId, CancellationToken cancellationToken = default);

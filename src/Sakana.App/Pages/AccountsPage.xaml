@@ -3,7 +3,7 @@
     x:Class="Sakana.App.Pages.AccountsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Grid Padding="32,26,32,32">
+    <ScrollViewer Padding="32,26,32,32" VerticalScrollBarVisibility="Auto">
         <StackPanel Spacing="22">
             <StackPanel Spacing="4">
                 <TextBlock Text="账户" FontSize="32" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
@@ -21,7 +21,7 @@
                     </Border>
                     <StackPanel Grid.Column="1" Spacing="10">
                         <TextBlock Text="安全地连接你的账户" FontSize="21" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
-                        <TextBlock Text="使用 Microsoft 设备码登录。启动游戏前会检查 Minecraft Java Edition 资格；Sakana 不提供离线启动。刷新凭据由 Windows DPAPI 保护，访问令牌只保存在内存中。登录应用由 Sakana 内置管理。" FontSize="14" TextWrapping="Wrap" Foreground="{ThemeResource SakanaMutedBrush}" />
+                        <TextBlock Text="可保存多个 Microsoft 账户，并选择当前用于启动 Minecraft 的账户。启动前会检查 Minecraft Java Edition 资格；Sakana 不提供离线启动。刷新凭据由 Windows DPAPI 保护，访问令牌只保存在内存中。" FontSize="14" TextWrapping="Wrap" Foreground="{ThemeResource SakanaMutedBrush}" />
                         <Border Background="{ThemeResource SakanaSurfaceRaisedBrush}" CornerRadius="10" Padding="12,9" HorizontalAlignment="Left">
                             <StackPanel Orientation="Horizontal" Spacing="8">
                                 <Ellipse x:Name="AccountStatusDot" Width="8" Height="8" Fill="{ThemeResource SakanaMutedBrush}" VerticalAlignment="Center" />
@@ -30,15 +30,59 @@
                         </Border>
                         <ProgressRing x:Name="SignInProgress" IsActive="False" Width="24" Height="24" HorizontalAlignment="Left" />
                         <InfoBar x:Name="AccountInfoBar" IsOpen="False" Severity="Informational" IsClosable="True" />
-                        <HyperlinkButton x:Name="ClientIdApprovalLink" Content="查看 Minecraft Java API 官方申请流程" NavigateUri="https://help.minecraft.net/hc/en-us/articles/16254801392141-New-Java-Edition-Game-Service-API-Review-or-Application-Process" Visibility="Collapsed" />
+                        <HyperlinkButton x:Name="ClientIdApprovalLink" Content="查看 Minecraft 官方 API 授权说明" NavigateUri="https://help.minecraft.net/hc/en-us/articles/16254801392141-New-Java-Edition-Game-Service-API-Review-or-Application-Process" Visibility="Collapsed" />
+                        <Button x:Name="ManageSkinButton" Content="在 Minecraft.net 管理皮肤" Click="ManageMinecraftSkin_Click" Padding="14,9" HorizontalAlignment="Left" Visibility="Collapsed" />
+                        <Border x:Name="CurrentSkinPreviewCard" Visibility="Collapsed" Padding="12" CornerRadius="10" Background="{ThemeResource SakanaSurfaceRaisedBrush}" HorizontalAlignment="Left">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Border Width="224" Height="224" CornerRadius="10" Background="{ThemeResource SakanaSurfaceBrush}">
+                                    <Grid Width="224" Height="224">
+                                        <Canvas
+                                            x:Name="SkinModelCanvas"
+                                            Width="224"
+                                            Height="224"
+                                            Background="{ThemeResource SakanaSurfaceBrush}"
+                                            PointerPressed="SkinModelCanvas_PointerPressed"
+                                            PointerReleased="SkinModelCanvas_PointerReleased">
+                                        </Canvas>
+                                        <StackPanel x:Name="SkinPreviewEmptyState" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed">
+                                            <SymbolIcon Symbol="Contact" HorizontalAlignment="Center" Foreground="{ThemeResource SakanaMutedBrush}" />
+                                            <TextBlock x:Name="SkinPreviewEmptyStateText" Text="暂时无法获取皮肤" FontSize="13" Foreground="{ThemeResource SakanaMutedBrush}" />
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                                <StackPanel Grid.Column="1" Spacing="8" VerticalAlignment="Center" MaxWidth="320">
+                                    <TextBlock Text="当前 Minecraft 皮肤" FontSize="14" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                                    <TextBlock x:Name="SkinVariantText" FontSize="12" Foreground="{ThemeResource SakanaMutedBrush}" />
+                                    <TextBlock x:Name="SkinPreviewStatusText" Text="正在加载皮肤预览…" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource SakanaMutedBrush}" />
+                                    <ToggleSwitch x:Name="SkinOuterLayerToggle" Header="显示皮肤外层" IsOn="True" Toggled="SkinOuterLayerToggle_Toggled" />
+                                    <Button x:Name="SkinViewSideButton" Content="显示背面" Click="SkinViewSideButton_Click" HorizontalAlignment="Left" />
+                                    <TextBlock Text="拖动预览可在正面和背面之间切换。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource SakanaMutedBrush}" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
                         <StackPanel Orientation="Horizontal" Spacing="10">
                             <Button x:Name="SignInButton" Content="登录 Microsoft 账户" Click="SignIn_Click" Padding="16,9" Style="{ThemeResource AccentButtonStyle}" FontWeight="SemiBold" />
                             <Button x:Name="CancelSignInButton" Content="取消登录" Click="CancelSignIn_Click" Visibility="Collapsed" />
-                            <Button x:Name="SignOutButton" Content="退出登录" Click="SignOut_Click" Visibility="Collapsed" />
+                            <Button x:Name="SignOutButton" Content="退出当前账户" Click="SignOut_Click" Visibility="Collapsed" />
                         </StackPanel>
                     </StackPanel>
                 </Grid>
             </Border>
+            <Border x:Name="SavedAccountsCard" Padding="20" CornerRadius="16" Background="{ThemeResource SakanaSurfaceBrush}" BorderBrush="{ThemeResource SakanaStrokeBrush}" BorderThickness="1" Visibility="Collapsed">
+                <StackPanel Spacing="12">
+                    <StackPanel Spacing="3">
+                        <TextBlock Text="已保存的账户" FontSize="18" FontWeight="SemiBold" Foreground="{ThemeResource SakanaTextBrush}" />
+                        <TextBlock Text="选择用于启动游戏的账户；移除会删除此设备上的加密登录凭据。" FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource SakanaMutedBrush}" />
+                    </StackPanel>
+                    <TextBlock x:Name="AccountsEmptyText" Text="还没有保存账户。" FontSize="13" Foreground="{ThemeResource SakanaMutedBrush}" Visibility="Collapsed" />
+                    <StackPanel x:Name="SavedAccountsListPanel" Spacing="8" />
+                </StackPanel>
+            </Border>
+
         </StackPanel>
-    </Grid>
+    </ScrollViewer>
 </Page>

@@ -18,6 +18,7 @@ public sealed class MinecraftInstaller : IMinecraftInstaller
     private readonly ParallelArtifactDownloader _downloader;
     private readonly MojangJavaRuntimeManager _javaRuntimeManager;
     private readonly IModrinthModpackService _modrinthModpackService;
+    private readonly ICurseForgeModpackService _curseForgeModpackService;
 
     public MinecraftInstaller(
         HttpClient httpClient,
@@ -27,7 +28,9 @@ public sealed class MinecraftInstaller : IMinecraftInstaller
         IQuiltLoaderCatalog quiltLoaderCatalog,
         IForgeNeoForgeLoaderCatalog forgeNeoForgeLoaderCatalog,
         MojangJavaRuntimeManager javaRuntimeManager,
-        IModrinthModpackService modrinthModpackService)
+        IModrinthModpackService modrinthModpackService,
+        ICurseForgeModpackService curseForgeModpackService,
+        DownloadConcurrencyOptions? downloadConcurrencyOptions = null)
     {
         _httpClient = httpClient;
         _dataDirectory = dataDirectory;
@@ -35,12 +38,13 @@ public sealed class MinecraftInstaller : IMinecraftInstaller
         _fabricLoaderCatalog = fabricLoaderCatalog;
         _quiltLoaderCatalog = quiltLoaderCatalog;
         _forgeNeoForgeLoaderCatalog = forgeNeoForgeLoaderCatalog;
-        _downloader = new ParallelArtifactDownloader(httpClient);
+        _downloader = new ParallelArtifactDownloader(httpClient, downloadConcurrencyOptions);
         _javaRuntimeManager = javaRuntimeManager;
         _modrinthModpackService = modrinthModpackService;
+        _curseForgeModpackService = curseForgeModpackService;
     }
 
-    public async Task InstallAsync(
+    public async Task<IReadOnlyList<CurseForgeManualDownload>> InstallAsync(
         InstanceProfile profile,
         IProgress<InstallationProgress>? progress = null,
         CancellationToken cancellationToken = default,
@@ -214,8 +218,10 @@ public sealed class MinecraftInstaller : IMinecraftInstaller
         }
 
         await _modrinthModpackService.InstallAsync(profile, _dataDirectory, progress, cancellationToken);
+        var manualDownloads = await _curseForgeModpackService.InstallAsync(profile, _dataDirectory, progress, cancellationToken);
 
         Report(InstallationStage.Completed, 1, 1, artifacts.Count, artifacts.Count, null);
+        return manualDownloads;
 
         void Report(InstallationStage stage, long bytes, long totalBytes, int completedFiles, int totalFiles, string? currentFile) =>
             progress?.Report(new InstallationProgress(profile.Id, stage, bytes, totalBytes, completedFiles, totalFiles, currentFile));

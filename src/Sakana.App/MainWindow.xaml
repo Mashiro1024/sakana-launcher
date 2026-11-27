@@ -21,22 +21,27 @@
         <TitleBar
             x:Name="AppTitleBar"
             Title="Sakana Launcher"
+            Subtitle="Java Edition"
             IsBackButtonVisible="False"
             IsPaneToggleButtonVisible="True"
             PaneToggleRequested="TitleBar_PaneToggleRequested">
             <TitleBar.IconSource>
-                <ImageIconSource ImageSource="Assets/AppIcon.ico" />
+                <ImageIconSource ImageSource="Assets/Square44x44Logo.scale-200.png" />
             </TitleBar.IconSource>
         </TitleBar>
 
         <NavigationView
             x:Name="NavView"
             Grid.Row="1"
+            OpenPaneLength="224"
+            CompactPaneLength="48"
             IsBackButtonVisible="Collapsed"
             IsPaneToggleButtonVisible="False"
             PaneDisplayMode="Left"
             IsSettingsVisible="True"
             Background="Transparent"
+            PaneOpening="NavView_PaneOpening"
+            PaneClosing="NavView_PaneClosing"
             SelectionChanged="NavView_SelectionChanged">
             <NavigationView.MenuItems>
                 <NavigationViewItem
@@ -74,11 +79,67 @@
                 </NavigationViewItem>
             </NavigationView.MenuItems>
             <NavigationView.PaneHeader>
-                <StackPanel Padding="16,16,12,12" Spacing="2">
-                    <TextBlock Text="SAKANA" FontSize="13" FontWeight="Bold" CharacterSpacing="100" Foreground="{ThemeResource SakanaTextBrush}" />
-                    <TextBlock Text="MINECRAFT JAVA" FontSize="10" CharacterSpacing="65" Foreground="{ThemeResource SakanaMutedBrush}" />
+                <StackPanel x:Name="PaneBrandHeader" Padding="14,10,12,10" Orientation="Horizontal" Spacing="10">
+                    <Image Source="Assets/Square44x44Logo.scale-200.png" Width="28" Height="28" VerticalAlignment="Center" />
+                    <StackPanel Spacing="1" VerticalAlignment="Center">
+                        <TextBlock Text="SAKANA" FontSize="13" FontWeight="Bold" CharacterSpacing="90" Foreground="{ThemeResource SakanaTextBrush}" />
+                        <TextBlock Text="MINECRAFT JAVA" FontSize="10" CharacterSpacing="60" Foreground="{ThemeResource SakanaMutedBrush}" />
+                    </StackPanel>
                 </StackPanel>
             </NavigationView.PaneHeader>
+            <NavigationView.PaneFooter>
+                <Button
+                    x:Name="AccountFooterButton"
+                    Margin="8,0,8,4"
+                    Padding="8,7"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Stretch"
+                    Background="{ThemeResource SakanaSurfaceBrush}"
+                    BorderBrush="{ThemeResource SakanaStrokeBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Click="AccountFooter_Click"
+                    ToolTipService.ToolTip="查看或切换 Minecraft 账户">
+                    <Grid ColumnSpacing="9">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="28" Height="28" CornerRadius="7" Background="{ThemeResource SakanaAccentSoftBrush}">
+                            <TextBlock
+                                x:Name="AccountFooterInitial"
+                                Text="M"
+                                FontSize="12"
+                                FontWeight="SemiBold"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                Foreground="{ThemeResource SakanaAccentBrush}" />
+                        </Border>
+                        <StackPanel x:Name="AccountFooterMeta" Grid.Column="1" VerticalAlignment="Center" Spacing="1">
+                            <TextBlock
+                                x:Name="AccountFooterName"
+                                Text="未登录账户"
+                                FontSize="12"
+                                FontWeight="SemiBold"
+                                Foreground="{ThemeResource SakanaTextBrush}"
+                                TextTrimming="CharacterEllipsis" />
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <Grid Width="6" Height="6" VerticalAlignment="Center">
+                                    <Ellipse x:Name="AccountDotMuted" Width="6" Height="6" Fill="{ThemeResource SakanaMutedBrush}" />
+                                    <Ellipse x:Name="AccountDotReady" Width="6" Height="6" Fill="{ThemeResource SakanaSuccessBrush}" Visibility="Collapsed" />
+                                    <Ellipse x:Name="AccountDotWarning" Width="6" Height="6" Fill="{ThemeResource SakanaWarningBrush}" Visibility="Collapsed" />
+                                </Grid>
+                                <TextBlock
+                                    x:Name="AccountFooterStatus"
+                                    Text="点击连接 Microsoft"
+                                    FontSize="11"
+                                    Foreground="{ThemeResource SakanaMutedBrush}"
+                                    TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Grid>
+                </Button>
+            </NavigationView.PaneFooter>
             <Frame x:Name="NavFrame">
                 <Frame.ContentTransitions>
                     <TransitionCollection>

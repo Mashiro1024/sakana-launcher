@@ -11,16 +11,19 @@ public sealed class LauncherService(
     IQuiltLoaderCatalog quiltLoaderCatalog,
     IForgeNeoForgeLoaderCatalog forgeNeoForgeLoaderCatalog,
     IModrinthModpackService modrinthModpackService,
+    ICurseForgeModpackService curseForgeModpackService,
     IModrinthModCatalog modrinthModCatalog,
     ILocalModService localModService,
     ILocalPackService localPackService,
     ILocalMinecraftWorldService localMinecraftWorldService,
     ILocalMinecraftServerService localMinecraftServerService,
+    IMinecraftServerStatusService minecraftServerStatusService,
     IJavaRuntimeCatalog javaRuntimeCatalog,
     IMinecraftInstaller installer,
     IMinecraftLaunchPlanner launchPlanner,
     IMinecraftProcessRunner processRunner,
-    ISakanaLogger logger) : ILauncherService
+    ISakanaLogger logger,
+    DownloadConcurrencyOptions? downloadConcurrencyOptions = null) : ILauncherService
 {
     private const int MaxRecentGameOutputLines = 500;
     private const int MinimumMemoryLimitMb = 256;
@@ -84,6 +87,21 @@ public sealed class LauncherService(
         await store.SaveSettingsAsync(settings with { Theme = theme }, cancellationToken);
     }
 
+    public async Task SaveMaxConcurrentDownloadsAsync(int maxConcurrentDownloads, CancellationToken cancellationToken = default)
+    {
+        if (maxConcurrentDownloads is < 1 or > 256)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxConcurrentDownloads), "下载并发数必须在 1 到 256 之间。");
+        }
+
+        var settings = await store.GetSettingsAsync(cancellationToken);
+        await store.SaveSettingsAsync(settings with { MaxConcurrentDownloads = maxConcurrentDownloads }, cancellationToken);
+        if (downloadConcurrencyOptions is not null)
+        {
+            downloadConcurrencyOptions.MaxConcurrentDownloads = maxConcurrentDownloads;
+        }
+    }
+
     public async Task SaveGlobalLaunchSettingsAsync(GlobalLaunchSettings settings, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(settings);
@@ -102,8 +120,52 @@ public sealed class LauncherService(
         await store.SaveGlobalLaunchSettingsAsync(settings with { JavaExecutablePath = NormalizeJavaPath(settings.JavaExecutablePath) }, cancellationToken);
     }
 
+    public async Task SaveLibraryViewPresetsAsync(
+        IReadOnlyList<LibraryViewPreset> presets,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(presets);
+        if (presets.Count > 30)
+        {
+            throw new ArgumentOutOfRangeException(nameof(presets), "最多可以保存 30 个实例视图。");
+        }
+
+        var normalized = new List<LibraryViewPreset>(presets.Count);
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var preset in presets)
+        {
+            if (preset is null || string.IsNullOrWhiteSpace(preset.Name) || preset.Name.Trim().Length > 50 || !names.Add(preset.Name.Trim()))
+            {
+                throw new ArgumentException("实例视图名称不能为空、不能超过 50 个字符，也不能重名。", nameof(presets));
+            }
+
+            if ((preset.SearchQuery?.Length ?? 0) > 200 || (preset.Group?.Length ?? 0) > 40 || (preset.Tag?.Length ?? 0) > 40)
+            {
+                throw new ArgumentException("实例视图中的搜索、分组或标签超出允许长度。", nameof(presets));
+            }
+
+            if (preset.Loader is not (null or "" or "vanilla" or "fabric" or "quilt" or "forge" or "neoforge") ||
+                preset.State is not (null or "" or "installed" or "uninstalled" or "installing" or "failed" or "running") ||
+                preset.SortOrder is not ("created-desc" or "name-asc" or "name-desc" or "version-desc"))
+            {
+                throw new ArgumentException("实例视图包含无法识别的筛选条件。", nameof(presets));
+            }
+
+            normalized.Add(preset with { Name = preset.Name.Trim(), SearchQuery = preset.SearchQuery?.Trim() ?? string.Empty });
+        }
+
+        var settings = await store.GetSettingsAsync(cancellationToken);
+        await store.SaveSettingsAsync(settings with { LibraryViewPresets = normalized }, cancellationToken);
+    }
+
     public Task<IReadOnlyList<JavaInstallation>> DetectJavaInstallationsAsync(CancellationToken cancellationToken = default) =>
         javaRuntimeCatalog.DetectInstalledJavaAsync(cancellationToken);
+
+    public Task<JavaInstallation> InstallJavaRuntimeAsync(
+        int majorVersion,
+        IProgress<InstallationProgress>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        javaRuntimeCatalog.InstallManagedRuntimeAsync(majorVersion, progress, cancellationToken);
 
     public Task<IReadOnlyList<InstanceProfile>> ListProfilesAsync(CancellationToken cancellationToken = default) =>
         store.ListProfilesAsync(cancellationToken);
@@ -136,7 +198,7 @@ public sealed class LauncherService(
         ReserveContentChanges(profileId);
 
         string? copiedPackPath = null;
-        var importedPackRelativePath = sourceProfile.ModrinthPackPath;
+        var importedPackRelativePath = sourceProfile.CurseForgePackPath ?? sourceProfile.ModrinthPackPath;
         var profileSaved = false;
         try
         {
@@ -151,21 +213,21 @@ public sealed class LauncherService(
                     cancellationToken);
             }
 
-            var importedPackSourcePath = string.IsNullOrWhiteSpace(sourceProfile.ModrinthPackPath)
+            var importedPackSourcePath = string.IsNullOrWhiteSpace(importedPackRelativePath)
                 ? null
-                : ResolveImportedPackPath(sourceProfile.ModrinthPackPath)
-                    ?? throw new InvalidDataException("此实例引用的 Modrinth 整合包文件无法复制，请重新导入整合包后再复制实例。");
+                : ResolveImportedPackPath(importedPackRelativePath)
+                    ?? throw new InvalidDataException("此实例引用的整合包文件无法复制，请重新导入整合包后再复制实例。");
             long packSize = 0;
             if (importedPackSourcePath is not null)
             {
                 if (!File.Exists(importedPackSourcePath))
                 {
-                    throw new FileNotFoundException("此实例引用的 Modrinth 整合包文件不存在。", importedPackSourcePath);
+                    throw new FileNotFoundException("此实例引用的整合包文件不存在。", importedPackSourcePath);
                 }
 
                 if ((File.GetAttributes(importedPackSourcePath) & FileAttributes.ReparsePoint) != 0)
                 {
-                    throw new IOException("Sakana refused to copy a redirected Modrinth pack file.");
+                    throw new IOException("Sakana refused to copy a redirected modpack file.");
                 }
 
                 packSize = new FileInfo(importedPackSourcePath).Length;
@@ -223,7 +285,7 @@ public sealed class LauncherService(
                 var importsDirectory = Path.Combine(DataDirectory, "imports");
                 EnsureNotReparsePoint(importsDirectory);
                 Directory.CreateDirectory(importsDirectory);
-                var storedFileName = $"{Guid.NewGuid():N}.mrpack";
+                var storedFileName = $"{Guid.NewGuid():N}{Path.GetExtension(importedPackSourcePath)}";
                 copiedPackPath = Path.Combine(importsDirectory, storedFileName);
                 ReportCopyProgress("正在复制整合包清单…", Path.GetFileName(importedPackSourcePath), force: true);
                 await CopyFileAtomicallyAsync(importedPackSourcePath, copiedPackPath, cancellationToken, copiedBytes =>
@@ -246,7 +308,8 @@ public sealed class LauncherService(
                     : InstanceProfileState.ProfileOnly,
                 CreatedAtUtc = DateTimeOffset.UtcNow,
                 LastError = null,
-                ModrinthPackPath = importedPackRelativePath
+                ModrinthPackPath = sourceProfile.CurseForgePackPath is null ? importedPackRelativePath : null,
+                CurseForgePackPath = sourceProfile.CurseForgePackPath is null ? null : importedPackRelativePath
             };
             if (!await store.TryCreateProfileAsync(duplicateProfile, cancellationToken))
             {
@@ -480,7 +543,7 @@ public sealed class LauncherService(
             }
 
             EnsureSafeInstanceDirectory(instanceRoot, instanceDirectory);
-            var importedPackPath = ResolveImportedPackPath(profile.ModrinthPackPath);
+            var importedPackPath = ResolveImportedPackPath(profile.CurseForgePackPath ?? profile.ModrinthPackPath);
             var packFileExists = importedPackPath is not null && File.Exists(importedPackPath);
             var instanceDirectoryExists = Directory.Exists(instanceDirectory);
             if (instanceDirectoryExists && (File.GetAttributes(instanceDirectory) & FileAttributes.ReparsePoint) != 0)
@@ -506,7 +569,7 @@ public sealed class LauncherService(
 
                     if (packFileExists && importedPackPath is not null)
                     {
-                        File.Move(importedPackPath, Path.Combine(stagedDirectory, "imported-pack.mrpack"));
+                        File.Move(importedPackPath, Path.Combine(stagedDirectory, $"imported-pack{Path.GetExtension(importedPackPath)}"));
                     }
                 }
                 catch
@@ -845,7 +908,7 @@ public sealed class LauncherService(
             Directory.Move(stagedInstance, instanceDirectory);
         }
 
-        var stagedPack = Path.Combine(stagedDirectory, "imported-pack.mrpack");
+        var stagedPack = Path.Combine(stagedDirectory, $"imported-pack{Path.GetExtension(importedPackPath ?? ".mrpack")}");
         if (importedPackPath is not null && File.Exists(stagedPack) && !File.Exists(importedPackPath))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(importedPackPath)!);
@@ -1069,6 +1132,9 @@ public sealed class LauncherService(
     public Task<IReadOnlyList<MinecraftGameVersion>> GetReleaseVersionsAsync(CancellationToken cancellationToken = default) =>
         versionCatalog.GetReleaseVersionsAsync(cancellationToken);
 
+    public Task<bool> SupportsQuickPlayAsync(string minecraftVersionId, CancellationToken cancellationToken = default) =>
+        launchPlanner.SupportsQuickPlayAsync(minecraftVersionId, cancellationToken);
+
     public Task<IReadOnlyList<MinecraftLoaderVersion>> GetFabricLoaderVersionsAsync(
         string minecraftVersionId,
         CancellationToken cancellationToken = default) =>
@@ -1089,6 +1155,11 @@ public sealed class LauncherService(
         string archivePath,
         CancellationToken cancellationToken = default) =>
         modrinthModpackService.InspectAsync(archivePath, cancellationToken);
+
+    public Task<CurseForgeModpackDescription> InspectCurseForgePackAsync(
+        string archivePath,
+        CancellationToken cancellationToken = default) =>
+        curseForgeModpackService.InspectAsync(archivePath, cancellationToken);
 
     public async Task<ModrinthModpackExportResult> ExportModrinthPackAsync(
         Guid profileId,
@@ -1301,12 +1372,91 @@ public sealed class LauncherService(
         }
     }
 
+    public async Task<InstanceProfile> ImportCurseForgePackAsync(
+        string archivePath,
+        string instanceName,
+        IReadOnlyCollection<string> selectedOptionalFiles,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(archivePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(instanceName);
+        ArgumentNullException.ThrowIfNull(selectedOptionalFiles);
+        var sourcePath = Path.GetFullPath(archivePath);
+        if (!File.Exists(sourcePath) || !string.Equals(Path.GetExtension(sourcePath), ".zip", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("请选择 CurseForge 导出的整合包 ZIP。", nameof(archivePath));
+        }
+
+        const long maxArchiveBytes = 4L * 1024 * 1024 * 1024;
+        if (new FileInfo(sourcePath).Length > maxArchiveBytes)
+        {
+            throw new InvalidDataException("所选 ZIP 超过 Sakana 的 4 GB 导入上限。");
+        }
+
+        if ((File.GetAttributes(sourcePath) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new IOException("Sakana refused to import a redirected CurseForge ZIP file.");
+        }
+
+        var normalizedName = InstanceDirectoryName.Validate(instanceName.Trim());
+        var importsDirectory = Path.Combine(DataDirectory, "imports");
+        EnsureNotReparsePoint(importsDirectory);
+        Directory.CreateDirectory(importsDirectory);
+        var storedFileName = $"{Guid.NewGuid():N}.zip";
+        var storedPath = Path.Combine(importsDirectory, storedFileName);
+        var relativePackPath = Path.Combine("imports", storedFileName).Replace(Path.DirectorySeparatorChar, '/');
+        var profileCreated = false;
+        try
+        {
+            await CopyFileAtomicallyAsync(sourcePath, storedPath, cancellationToken);
+            var description = await curseForgeModpackService.InspectAsync(storedPath, cancellationToken);
+            var optionalFiles = description.Files.Where(file => !file.Required)
+                .Select(file => $"{file.ProjectId}:{file.FileId}")
+                .ToHashSet(StringComparer.Ordinal);
+            var selectedFiles = selectedOptionalFiles.Distinct(StringComparer.Ordinal).ToArray();
+            if (selectedFiles.Any(file => !optionalFiles.Contains(file)))
+            {
+                throw new InvalidDataException("所选可选文件与 CurseForge 整合包清单不匹配。");
+            }
+
+            var profile = (await CreateProfileRecordAsync(
+                normalizedName,
+                description.MinecraftVersion,
+                description.LoaderType,
+                description.LoaderVersion,
+                modrinthPackPath: null,
+                modrinthSelectedOptionalFilesJson: JsonSerializer.Serialize(selectedFiles),
+                cancellationToken,
+                validateLoaderAvailability: false)) with
+            {
+                CurseForgePackPath = relativePackPath
+            };
+            await EnsureUniqueProfileNameAsync(profile.Name, exceptProfileId: null, cancellationToken: cancellationToken);
+            EnsureInstanceDirectoryAvailable(InstanceDirectoryName.ForProfile(profile));
+            if (!await store.TryCreateProfileAsync(profile, cancellationToken))
+            {
+                throw new ProfileNameInUseException(profile.Name);
+            }
+
+            profileCreated = true;
+            _instanceDirectoryNames[profile.Id] = InstanceDirectoryName.ForProfile(profile);
+            Directory.CreateDirectory(Path.Combine(DataDirectory, "instances", InstanceDirectoryName.ForProfile(profile)));
+            return profile;
+        }
+        finally
+        {
+            if (!profileCreated && File.Exists(storedPath)) File.Delete(storedPath);
+        }
+    }
+
     public Task<ModrinthProjectSearchPage> SearchModrinthModpacksAsync(
         string query,
         string sortOrder,
         int offset,
-        CancellationToken cancellationToken = default) =>
-        modrinthModCatalog.SearchModpacksAsync(query, sortOrder, offset, cancellationToken);
+        CancellationToken cancellationToken = default,
+        string? gameVersion = null,
+        string? loader = null) =>
+        modrinthModCatalog.SearchModpacksAsync(query, sortOrder, offset, cancellationToken, gameVersion, loader);
 
     public Task<IReadOnlyList<ModrinthModRelease>> GetSupportedModrinthModpackVersionsAsync(
         string projectId,
@@ -1523,6 +1673,15 @@ public sealed class LauncherService(
         return await localMinecraftServerService.ListAsync(InstanceDirectoryName.ForProfile(profile), cancellationToken);
     }
 
+    public async Task<MinecraftServerStatus> GetServerBookmarkStatusAsync(Guid profileId, Guid bookmarkId, CancellationToken cancellationToken = default)
+    {
+        var profile = await GetInstalledProfileForContentAsync(profileId, cancellationToken);
+        var bookmarks = await localMinecraftServerService.ListAsync(InstanceDirectoryName.ForProfile(profile), cancellationToken);
+        var bookmark = bookmarks.FirstOrDefault(item => item.Id == bookmarkId)
+            ?? throw new KeyNotFoundException("This saved server no longer exists. Refresh the list and try again.");
+        return await minecraftServerStatusService.PingAsync(bookmark.Address, cancellationToken);
+    }
+
     public async Task<MinecraftServerBookmark> AddServerBookmarkAsync(Guid profileId, string name, string address, CancellationToken cancellationToken = default)
     {
         var profile = await GetInstalledProfileForContentAsync(profileId, cancellationToken);
@@ -1537,6 +1696,25 @@ public sealed class LauncherService(
         }
     }
 
+    public async Task<MinecraftServerBookmark> UpdateServerBookmarkAsync(
+        Guid profileId,
+        Guid bookmarkId,
+        string name,
+        string address,
+        CancellationToken cancellationToken = default)
+    {
+        var profile = await GetInstalledProfileForContentAsync(profileId, cancellationToken);
+        ReserveContentChanges(profileId);
+        try
+        {
+            return await localMinecraftServerService.UpdateAsync(InstanceDirectoryName.ForProfile(profile), bookmarkId, name, address, cancellationToken);
+        }
+        finally
+        {
+            _contentReservations.TryRemove(profileId, out _);
+        }
+    }
+
     public async Task RemoveServerBookmarkAsync(Guid profileId, Guid bookmarkId, CancellationToken cancellationToken = default)
     {
         var profile = await GetInstalledProfileForContentAsync(profileId, cancellationToken);
@@ -1544,6 +1722,20 @@ public sealed class LauncherService(
         try
         {
             await localMinecraftServerService.RemoveAsync(InstanceDirectoryName.ForProfile(profile), bookmarkId, cancellationToken);
+        }
+        finally
+        {
+            _contentReservations.TryRemove(profileId, out _);
+        }
+    }
+
+    public async Task SetServerBookmarkPinnedAsync(Guid profileId, Guid bookmarkId, bool isPinned, CancellationToken cancellationToken = default)
+    {
+        var profile = await GetInstalledProfileForContentAsync(profileId, cancellationToken);
+        ReserveContentChanges(profileId);
+        try
+        {
+            await localMinecraftServerService.SetPinnedAsync(InstanceDirectoryName.ForProfile(profile), bookmarkId, isPinned, cancellationToken);
         }
         finally
         {
@@ -1925,7 +2117,8 @@ public sealed class LauncherService(
             profile.Fullscreen,
             profile.WindowWidth,
             profile.WindowHeight,
-            profile.UseGlobalLaunchSettings);
+            profile.UseGlobalLaunchSettings,
+            profile.MinecraftAccountUuid);
         await store.SetInstanceLaunchSettingsAsync(profileId, settings, cancellationToken);
         return await store.GetProfileAsync(profileId, cancellationToken)
             ?? throw new KeyNotFoundException("The selected instance profile no longer exists.");
@@ -1992,7 +2185,15 @@ public sealed class LauncherService(
             throw new InvalidOperationException("Wait for the instance installation to finish before changing launch settings.");
         }
 
-        var normalized = settings with { JavaExecutablePath = javaPath };
+        var accountUuid = string.IsNullOrWhiteSpace(settings.MinecraftAccountUuid)
+            ? null
+            : settings.MinecraftAccountUuid.Trim();
+        if (accountUuid is not null && (accountUuid.Length > 64 || accountUuid.Any(character => !Uri.IsHexDigit(character) && character != '-')))
+        {
+            throw new ArgumentException("The selected Minecraft account identifier is invalid.", nameof(settings));
+        }
+
+        var normalized = settings with { JavaExecutablePath = javaPath, MinecraftAccountUuid = accountUuid };
         await store.SetInstanceLaunchSettingsAsync(profileId, normalized, cancellationToken);
         return await store.GetProfileAsync(profileId, cancellationToken)
             ?? throw new KeyNotFoundException("The selected instance profile no longer exists.");
@@ -2071,17 +2272,17 @@ public sealed class LauncherService(
         WindowHeight = settings.WindowHeight
     };
 
-    public async Task InstallProfileAsync(Guid profileId, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<CurseForgeManualDownload>> InstallProfileAsync(Guid profileId, CancellationToken cancellationToken = default)
     {
-        await RunProfileInstallAsync(profileId, requireInstalled: false, cancellationToken);
+        return RunProfileInstallAsync(profileId, requireInstalled: false, cancellationToken);
     }
 
-    public async Task RepairProfileAsync(Guid profileId, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<CurseForgeManualDownload>> RepairProfileAsync(Guid profileId, CancellationToken cancellationToken = default)
     {
-        await RunProfileInstallAsync(profileId, requireInstalled: true, cancellationToken);
+        return RunProfileInstallAsync(profileId, requireInstalled: true, cancellationToken);
     }
 
-    private async Task RunProfileInstallAsync(
+    private async Task<IReadOnlyList<CurseForgeManualDownload>> RunProfileInstallAsync(
         Guid profileId,
         bool requireInstalled,
         CancellationToken cancellationToken)
@@ -2116,7 +2317,7 @@ public sealed class LauncherService(
 
             if (!requireInstalled && profile.State == InstanceProfileState.Installed)
             {
-                return;
+                return Array.Empty<CurseForgeManualDownload>();
             }
 
             // Recheck after reserving the install slot so a concurrent launch cannot start
@@ -2138,7 +2339,7 @@ public sealed class LauncherService(
                 error: null,
                 cancellationToken: installCancellation.Token);
             stateChangedToInstalling = true;
-            await installer.InstallAsync(
+            var manualDownloads = await installer.InstallAsync(
                 effectiveProfile,
                 progress,
                 installCancellation.Token,
@@ -2148,6 +2349,7 @@ public sealed class LauncherService(
                 InstanceProfileState.Installed,
                 error: null,
                 cancellationToken: installCancellation.Token);
+            return manualDownloads;
         }
         catch (OperationCanceledException)
         {

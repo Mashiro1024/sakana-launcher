@@ -19,6 +19,8 @@ public sealed class InstanceCardViewModel : ViewModelBase
     private int? _processId;
     private string? _lastLaunchStatus;
     private ImageSource? _iconImage;
+    private bool? _quickPlaySupported;
+    private string _quickPlaySupportText = "正在检查快速启动支持…";
 
     public InstanceCardViewModel(InstanceProfile profile, GlobalLaunchSettings? globalLaunchSettings = null, string? dataDirectory = null)
     {
@@ -36,13 +38,32 @@ public sealed class InstanceCardViewModel : ViewModelBase
     public bool SupportsModManagement => _profile.LoaderType is MinecraftLoaderType.Fabric or MinecraftLoaderType.Quilt or MinecraftLoaderType.Forge or MinecraftLoaderType.NeoForge;
     public string Name => _profile.Name;
     public string VersionId => _profile.VersionId;
+    public string LoaderBadgeText => _profile.LoaderType switch
+    {
+        MinecraftLoaderType.Fabric => "F",
+        MinecraftLoaderType.Quilt => "Q",
+        MinecraftLoaderType.Forge => "FG",
+        MinecraftLoaderType.NeoForge => "NF",
+        _ => "V"
+    };
     public DateTimeOffset CreatedAtUtc => _profile.CreatedAtUtc;
     public string? GroupName => _profile.GroupName;
     public string? IconFileName => _profile.IconFileName;
+    public string? MinecraftAccountUuid => _profile.MinecraftAccountUuid;
     public IReadOnlyList<string> Tags => ParseTags(_profile.TagsJson);
     public ImageSource? IconImage => _iconImage;
     public Visibility CustomIconVisibility => _iconImage is null ? Visibility.Collapsed : Visibility.Visible;
     public Visibility DefaultIconVisibility => _iconImage is null ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility VanillaDefaultGlyphVisibility => _iconImage is null && _profile.LoaderType == MinecraftLoaderType.Vanilla ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility ModdedDefaultGlyphVisibility => _iconImage is null && _profile.LoaderType != MinecraftLoaderType.Vanilla ? Visibility.Visible : Visibility.Collapsed;
+    public string LoaderDisplayName => _profile.LoaderType switch
+    {
+        MinecraftLoaderType.Fabric => "Fabric",
+        MinecraftLoaderType.Quilt => "Quilt",
+        MinecraftLoaderType.Forge => "Forge",
+        MinecraftLoaderType.NeoForge => "NeoForge",
+        _ => "原版"
+    };
     public string OrganizationLabel
     {
         get
@@ -67,6 +88,9 @@ public sealed class InstanceCardViewModel : ViewModelBase
     public bool UseGlobalLaunchSettings => _profile.UseGlobalLaunchSettings;
     public bool UseAutomaticMemory => _profile.UseGlobalLaunchSettings ? _globalLaunchSettings.UseAutomaticMemory : _profile.UseAutomaticMemory;
     public string? JavaExecutablePath => _profile.JavaExecutablePath;
+    public string? EffectiveJavaExecutablePath => _profile.UseGlobalLaunchSettings
+        ? _globalLaunchSettings.JavaExecutablePath
+        : _profile.JavaExecutablePath;
     public string CustomJavaArguments => _profile.CustomJavaArguments;
     public string CustomEnvironmentVariablesJson => _profile.CustomEnvironmentVariablesJson;
     public bool Fullscreen => _profile.Fullscreen;
@@ -75,7 +99,17 @@ public sealed class InstanceCardViewModel : ViewModelBase
     public string MemoryLabel => UseAutomaticMemory
         ? "内存 · 自动分配"
         : $"内存 · {MinMemoryMb}–{MaxMemoryMb} MB";
+    public string CompactMemoryLabel => UseAutomaticMemory
+        ? "自动内存"
+        : $"{MinMemoryMb}–{MaxMemoryMb} MB";
     public string? LastError => _profile.LastError;
+    public string QuickPlaySupportText => _quickPlaySupportText;
+    public Visibility QuickPlaySupportVisibility => _profile.State == InstanceProfileState.Installed
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+    public Visibility QuickPlayChipVisibility => _profile.State == InstanceProfileState.Installed && _quickPlaySupported == true
+        ? Visibility.Visible
+        : Visibility.Collapsed;
     public bool IsRunning => _isRunning;
     public bool IsLaunching => _isLaunching;
 
@@ -95,6 +129,35 @@ public sealed class InstanceCardViewModel : ViewModelBase
         InstanceProfileState.Failed => "安装失败",
         _ => "尚未安装"
     };
+
+    public string StateBadgeText => _profile.State switch
+    {
+        InstanceProfileState.Installing => "安装中",
+        InstanceProfileState.Installed when _isLaunching => "正在启动…",
+        InstanceProfileState.Installed when _isRunning => $"运行中 · PID {_processId}",
+        InstanceProfileState.Installed when _lastLaunchStatus is not null => _lastLaunchStatus,
+        InstanceProfileState.Installed => "环境已就绪",
+        InstanceProfileState.Cancelled => "已取消",
+        InstanceProfileState.Failed => "安装失败",
+        _ => "待安装"
+    };
+
+    public Visibility StateReadyVisibility => _profile.State == InstanceProfileState.Installed && !_isLaunching && !_isRunning
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+
+    public Visibility StateActiveVisibility => _profile.State == InstanceProfileState.Installing ||
+                                              (_profile.State == InstanceProfileState.Installed && (_isLaunching || _isRunning))
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+
+    public Visibility StateWarningVisibility => _profile.State is InstanceProfileState.ProfileOnly or InstanceProfileState.Cancelled
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+
+    public Visibility StateErrorVisibility => _profile.State == InstanceProfileState.Failed
+        ? Visibility.Visible
+        : Visibility.Collapsed;
 
     public double ProgressValue
     {
@@ -172,6 +235,27 @@ public sealed class InstanceCardViewModel : ViewModelBase
         NotifyStateProperties();
     }
 
+    public void SetQuickPlaySupport(bool? supportsQuickPlay)
+    {
+        _quickPlaySupported = supportsQuickPlay;
+        _quickPlaySupportText = supportsQuickPlay switch
+        {
+            true => "支持直达世界和服务器",
+            false => "该版本不支持直达启动",
+            _ => "快速启动兼容信息暂不可用"
+        };
+        OnPropertyChanged(nameof(QuickPlaySupportText));
+        OnPropertyChanged(nameof(QuickPlayChipVisibility));
+    }
+
+    public void SetQuickPlayChecking()
+    {
+        _quickPlaySupported = null;
+        _quickPlaySupportText = "正在检查快速启动支持…";
+        OnPropertyChanged(nameof(QuickPlaySupportText));
+        OnPropertyChanged(nameof(QuickPlayChipVisibility));
+    }
+
     public void Apply(InstanceProfile profile)
     {
         _profile = profile;
@@ -190,6 +274,7 @@ public sealed class InstanceCardViewModel : ViewModelBase
         OnPropertyChanged(nameof(Name));
         OnPropertyChanged(nameof(GroupName));
         OnPropertyChanged(nameof(IconFileName));
+        OnPropertyChanged(nameof(MinecraftAccountUuid));
         OnPropertyChanged(nameof(Tags));
         OnPropertyChanged(nameof(OrganizationLabel));
         OnPropertyChanged(nameof(OrganizationVisibility));
@@ -200,9 +285,13 @@ public sealed class InstanceCardViewModel : ViewModelBase
         OnPropertyChanged(nameof(WindowWidth));
         OnPropertyChanged(nameof(WindowHeight));
         OnPropertyChanged(nameof(MemoryLabel));
+        OnPropertyChanged(nameof(CompactMemoryLabel));
+        OnPropertyChanged(nameof(LoaderDisplayName));
+        OnPropertyChanged(nameof(VanillaDefaultGlyphVisibility));
+        OnPropertyChanged(nameof(ModdedDefaultGlyphVisibility));
     }
 
-    public bool MatchesFilter(string query, string? groupFilter, string? loaderFilter, string? stateFilter)
+    public bool MatchesFilter(string query, string? groupFilter, string? loaderFilter, string? stateFilter, string? tagFilter = null)
     {
         if (!string.IsNullOrWhiteSpace(groupFilter) &&
             !string.Equals(_profile.GroupName, groupFilter, StringComparison.OrdinalIgnoreCase))
@@ -238,6 +327,12 @@ public sealed class InstanceCardViewModel : ViewModelBase
         };
         if (!matchesState) return false;
 
+        if (!string.IsNullOrWhiteSpace(tagFilter) &&
+            !Tags.Contains(tagFilter, StringComparer.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         if (string.IsNullOrWhiteSpace(query)) return true;
         return _profile.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                VersionLabel.Contains(query, StringComparison.OrdinalIgnoreCase) ||
@@ -272,6 +367,8 @@ public sealed class InstanceCardViewModel : ViewModelBase
         OnPropertyChanged(nameof(IconImage));
         OnPropertyChanged(nameof(CustomIconVisibility));
         OnPropertyChanged(nameof(DefaultIconVisibility));
+        OnPropertyChanged(nameof(VanillaDefaultGlyphVisibility));
+        OnPropertyChanged(nameof(ModdedDefaultGlyphVisibility));
     }
 
     private static IReadOnlyList<string> ParseTags(string? tagsJson)
@@ -355,6 +452,8 @@ public sealed class InstanceCardViewModel : ViewModelBase
         OnPropertyChanged(nameof(ProfileState));
         OnPropertyChanged(nameof(SupportsModManagement));
         OnPropertyChanged(nameof(VersionLabel));
+        OnPropertyChanged(nameof(LoaderBadgeText));
+        OnPropertyChanged(nameof(StateBadgeText));
         OnPropertyChanged(nameof(InstallActionVisibility));
         OnPropertyChanged(nameof(RepairActionVisibility));
         OnPropertyChanged(nameof(LaunchSettingsVisibility));
@@ -363,6 +462,8 @@ public sealed class InstanceCardViewModel : ViewModelBase
         OnPropertyChanged(nameof(CancelActionVisibility));
         OnPropertyChanged(nameof(ProgressVisibility));
         OnPropertyChanged(nameof(InstalledVisibility));
+        OnPropertyChanged(nameof(QuickPlaySupportVisibility));
+        OnPropertyChanged(nameof(QuickPlayChipVisibility));
         OnPropertyChanged(nameof(ErrorVisibility));
         OnPropertyChanged(nameof(LastError));
         NotifyLaunchProperties();
@@ -371,6 +472,11 @@ public sealed class InstanceCardViewModel : ViewModelBase
     private void NotifyLaunchProperties()
     {
         OnPropertyChanged(nameof(StateText));
+        OnPropertyChanged(nameof(StateBadgeText));
+        OnPropertyChanged(nameof(StateReadyVisibility));
+        OnPropertyChanged(nameof(StateActiveVisibility));
+        OnPropertyChanged(nameof(StateWarningVisibility));
+        OnPropertyChanged(nameof(StateErrorVisibility));
         OnPropertyChanged(nameof(LaunchStatusText));
         OnPropertyChanged(nameof(LaunchActionVisibility));
         OnPropertyChanged(nameof(StopActionVisibility));

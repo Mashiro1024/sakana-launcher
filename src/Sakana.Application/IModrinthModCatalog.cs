@@ -56,7 +56,9 @@ public interface IModrinthModCatalog
         string query,
         string sortOrder,
         int offset,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        string? gameVersion = null,
+        string? loader = null);
 
     Task<IReadOnlyList<ModrinthModRelease>> GetSupportedModpackVersionsAsync(
         string projectId,

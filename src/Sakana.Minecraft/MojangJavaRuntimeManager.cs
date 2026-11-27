@@ -3,6 +3,8 @@ using System.Text.Json;
 using System.Globalization;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
+using System.Collections.Concurrent;
+using Microsoft.Win32;
 using Sakana.Application;
 using Sakana.Domain;
 
@@ -20,8 +22,8 @@ public sealed class MojangJavaRuntimeManager : IJavaRuntimeCatalog
     private readonly string _cacheDirectory;
     private readonly ParallelArtifactDownloader _downloader;
 
-    public MojangJavaRuntimeManager(HttpClient httpClient, string dataDirectory)
-        : this(httpClient, dataDirectory, new ParallelArtifactDownloader(httpClient))
+    public MojangJavaRuntimeManager(HttpClient httpClient, string dataDirectory, DownloadConcurrencyOptions? downloadConcurrencyOptions = null)
+        : this(httpClient, dataDirectory, new ParallelArtifactDownloader(httpClient, downloadConcurrencyOptions))
     {
     }
 
@@ -49,21 +51,59 @@ public sealed class MojangJavaRuntimeManager : IJavaRuntimeCatalog
 
     public async Task<IReadOnlyList<JavaInstallation>> DetectInstalledJavaAsync(CancellationToken cancellationToken = default)
     {
-        var installations = new List<JavaInstallation>();
-        foreach (var executablePath in GetJavaCandidates().Take(24))
+        // Registry and directory discovery can touch several large installation roots. Keep
+        // that synchronous work off the UI thread, especially when the user has many JDKs.
+        var candidates = await Task.Run(() => GetJavaCandidates(cancellationToken), cancellationToken);
+        using var concurrencyLimit = new SemaphoreSlim(8, 8);
+        var installations = new ConcurrentBag<JavaInstallation>();
+        var checks = candidates.Select(async executablePath =>
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var installation = await ReadJavaInstallationAsync(executablePath, cancellationToken);
-            if (installation is not null && installations.All(item => !string.Equals(item.ExecutablePath, installation.ExecutablePath, StringComparison.OrdinalIgnoreCase)))
+            await concurrencyLimit.WaitAsync(cancellationToken);
+            try
             {
-                installations.Add(installation);
+                var installation = await ReadJavaInstallationAsync(executablePath, cancellationToken);
+                if (installation is not null)
+                {
+                    installations.Add(installation);
+                }
             }
-        }
+            finally
+            {
+                concurrencyLimit.Release();
+            }
+        });
+        await Task.WhenAll(checks);
 
         return installations
+            .DistinctBy(item => item.ExecutablePath, StringComparer.OrdinalIgnoreCase)
             .OrderByDescending(item => item.MajorVersion)
             .ThenBy(item => item.ExecutablePath, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    public async Task<JavaInstallation> InstallManagedRuntimeAsync(
+        int majorVersion,
+        IProgress<InstallationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var component = majorVersion switch
+        {
+            8 => "jre-legacy",
+            16 => "java-runtime-alpha",
+            17 => "java-runtime-gamma",
+            21 => "java-runtime-delta",
+            25 => "java-runtime-epsilon",
+            _ => throw new ArgumentOutOfRangeException(nameof(majorVersion), "Sakana currently offers Mojang managed Java 8, 16, 17, 21, and 25 runtimes.")
+        };
+        var javaVersion = new MojangJavaVersion { MajorVersion = majorVersion, Component = component };
+        var executablePath = await EnsureRuntimeAsync(
+            Guid.Empty,
+            javaVersion,
+            progress,
+            cancellationToken,
+            preferManagedRuntime: true);
+        return await ReadJavaInstallationAsync(executablePath, cancellationToken)
+            ?? throw new InvalidDataException($"The downloaded Java {majorVersion} runtime could not be started.");
     }
 
     internal async Task<string> EnsureRuntimeAsync(
@@ -72,7 +112,8 @@ public sealed class MojangJavaRuntimeManager : IJavaRuntimeCatalog
         IProgress<InstallationProgress>? progress,
         CancellationToken cancellationToken,
         bool forceRevalidation = false,
-        string? preferredJavaExecutablePath = null)
+        string? preferredJavaExecutablePath = null,
+        bool preferManagedRuntime = false)
     {
         var requirement = ResolveRequirement(javaVersion);
         if (!string.IsNullOrWhiteSpace(preferredJavaExecutablePath))
@@ -86,11 +127,14 @@ public sealed class MojangJavaRuntimeManager : IJavaRuntimeCatalog
             return preferred.ExecutablePath;
         }
 
-        var installedJava = await DetectInstalledJavaAsync(cancellationToken);
-        var compatibleJava = installedJava.FirstOrDefault(item => item.MajorVersion == requirement.MajorVersion);
-        if (compatibleJava is not null)
+        if (!preferManagedRuntime)
         {
-            return compatibleJava.ExecutablePath;
+            var installedJava = await DetectInstalledJavaAsync(cancellationToken);
+            var compatibleJava = installedJava.FirstOrDefault(item => item.MajorVersion == requirement.MajorVersion);
+            if (compatibleJava is not null)
+            {
+                return compatibleJava.ExecutablePath;
+            }
         }
 
         var managedRuntime = GetInstalledRuntimeExecutablePath(javaVersion);
@@ -194,52 +238,239 @@ public sealed class MojangJavaRuntimeManager : IJavaRuntimeCatalog
         return javaPath;
     }
 
-    private static IEnumerable<string> GetJavaCandidates()
+    private IReadOnlyList<string> GetJavaCandidates(CancellationToken cancellationToken)
     {
-        var candidates = new List<string>();
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         void AddCandidate(string? path)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(path)) return;
-            var fullPath = Path.GetFullPath(path.Trim().Trim('"'));
-            if (File.Exists(fullPath) && !candidates.Contains(fullPath, StringComparer.OrdinalIgnoreCase))
+            try
             {
-                candidates.Add(fullPath);
+                var fullPath = Path.GetFullPath(path.Trim().Trim('"'));
+                if (File.Exists(fullPath)) candidates.Add(fullPath);
             }
+            catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or System.Security.SecurityException or NotSupportedException) { }
+        }
+
+        void AddJavaHome(string? javaHome)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(javaHome)) return;
+            try
+            {
+                var trimmed = javaHome.Trim().Trim('"');
+                if (Path.GetFileName(trimmed).Equals("java.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    AddCandidate(trimmed);
+                    return;
+                }
+
+                AddCandidate(Path.Combine(trimmed, "bin", "java.exe"));
+            }
+            catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or System.Security.SecurityException or NotSupportedException) { }
         }
 
         var javaHome = Environment.GetEnvironmentVariable("JAVA_HOME");
-        if (!string.IsNullOrWhiteSpace(javaHome))
-        {
-            AddCandidate(Path.Combine(javaHome, "bin", "java.exe"));
-        }
+        AddJavaHome(javaHome);
 
-        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                     .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             AddCandidate(Path.Combine(directory.Trim().Trim('"'), "java.exe"));
         }
 
-        var roots = new[]
+        // Read persisted machine and user values too: the running launcher process can
+        // have an older environment block than the Java installations the user just added.
+        if (OperatingSystem.IsWindows())
         {
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs")
-        };
-        var vendorNames = new[] { "Java", "Eclipse Adoptium", "Microsoft", "Zulu", "BellSoft", "Amazon Corretto", "Semeru" };
-        foreach (var root in roots.Where(Directory.Exists))
-        {
-            foreach (var vendor in vendorNames)
+            foreach (var (hive, subKeyPath) in new[]
+                     {
+                         (RegistryHive.LocalMachine, @"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+                         (RegistryHive.CurrentUser, @"Environment")
+                     })
             {
-                var vendorDirectory = Path.Combine(root, vendor);
-                AddCandidate(Path.Combine(vendorDirectory, "bin", "java.exe"));
-                if (!Directory.Exists(vendorDirectory)) continue;
-                foreach (var installationDirectory in Directory.EnumerateDirectories(vendorDirectory, "*", SearchOption.TopDirectoryOnly).Take(8))
+                cancellationToken.ThrowIfCancellationRequested();
+                try
                 {
-                    AddCandidate(Path.Combine(installationDirectory, "bin", "java.exe"));
+                    using var environmentKey = RegistryKey.OpenBaseKey(hive, RegistryView.Registry64).OpenSubKey(subKeyPath);
+                    if (environmentKey is null) continue;
+
+                    if (environmentKey.GetValue("JAVA_HOME", null, RegistryValueOptions.DoNotExpandEnvironmentNames) is string registeredJavaHome)
+                    {
+                        AddJavaHome(Environment.ExpandEnvironmentVariables(registeredJavaHome));
+                    }
+
+                    if (environmentKey.GetValue("Path", null, RegistryValueOptions.DoNotExpandEnvironmentNames) is string registeredPath)
+                    {
+                        foreach (var directory in Environment.ExpandEnvironmentVariables(registeredPath)
+                                     .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            AddCandidate(Path.Combine(directory.Trim().Trim('"'), "java.exe"));
+                        }
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException)
+                {
+                    // Java discovery should continue when a registry hive is inaccessible.
                 }
             }
         }
 
-        return candidates;
+        var registryLocations = new[]
+        {
+            @"SOFTWARE\JavaSoft\JDK",
+            @"SOFTWARE\JavaSoft\Java Development Kit",
+            @"SOFTWARE\JavaSoft\JRE",
+            @"SOFTWARE\JavaSoft\Java Runtime Environment",
+            @"SOFTWARE\Eclipse Adoptium\JDK",
+            @"SOFTWARE\Microsoft\JDK",
+            @"SOFTWARE\Amazon Corretto",
+            @"SOFTWARE\Azul Systems\Zulu",
+            @"SOFTWARE\BellSoft\Liberica",
+            @"SOFTWARE\IBM\Semeru"
+        };
+        if (OperatingSystem.IsWindows())
+        {
+            foreach (var hive in new[] { RegistryHive.LocalMachine, RegistryHive.CurrentUser })
+            foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    using var baseKey = RegistryKey.OpenBaseKey(hive, view);
+                    foreach (var location in registryLocations)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        try
+                        {
+                            using var key = baseKey.OpenSubKey(location);
+                            if (key is not null) ScanRegistryKey(key, depth: 3);
+                        }
+                        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException) { }
+            }
+        }
+
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var roamingAppData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var roots = new (string Path, int Depth)[]
+        {
+            (Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), 2),
+            (Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), 2),
+            (Path.Combine(localAppData, "Programs"), 2),
+            (Path.Combine(localAppData, "Microsoft", "WinGet", "Packages"), 3),
+            (Path.Combine(programData, "chocolatey", "lib"), 3),
+            (Path.Combine(userProfile, ".jdks"), 2),
+            (Path.Combine(userProfile, ".jabba", "jdk"), 2),
+            (Path.Combine(userProfile, ".gradle", "jdks"), 3),
+            (Path.Combine(userProfile, "scoop", "apps"), 2),
+            (Path.Combine(localAppData, "JetBrains", "Toolbox", "apps"), 4),
+            (Path.Combine(roamingAppData, ".minecraft", "runtime"), 2),
+            (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Android", "Android Studio", "jbr"), 0)
+        };
+        foreach (var (root, depth) in roots
+                     .DistinctBy(item => item.Path, StringComparer.OrdinalIgnoreCase)
+                     .Where(item => Directory.Exists(item.Path)))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ScanDirectory(root, remainingDepth: depth);
+        }
+
+        // The vanilla launcher's runtime layout nests the executable several folders
+        // below .minecraft\runtime, so the shallow normal-install scan above misses it.
+        var vanillaRuntimeRoot = Path.Combine(roamingAppData, ".minecraft", "runtime");
+        ScanExecutableTree(vanillaRuntimeRoot);
+
+        var managedRuntimeRoot = Path.Combine(_dataDirectory, "runtimes");
+        ScanExecutableTree(managedRuntimeRoot);
+
+        return candidates.ToArray();
+
+        void ScanDirectory(string directory, int remainingDepth)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AddJavaHome(directory);
+            if (remainingDepth <= 0) return;
+            try
+            {
+                foreach (var childDirectory in Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (IsReparsePoint(childDirectory)) continue;
+                    ScanDirectory(childDirectory, remainingDepth - 1);
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+        }
+
+        void ScanExecutableTree(string root)
+        {
+            if (!Directory.Exists(root)) return;
+            var pendingDirectories = new Stack<string>();
+            pendingDirectories.Push(root);
+            while (pendingDirectories.TryPop(out var directory))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    foreach (var executable in Directory.EnumerateFiles(directory, "java.exe", SearchOption.TopDirectoryOnly))
+                    {
+                        AddCandidate(executable);
+                    }
+
+                    foreach (var childDirectory in Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (!IsReparsePoint(childDirectory))
+                        {
+                            pendingDirectories.Push(childDirectory);
+                        }
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+            }
+        }
+
+        static bool IsReparsePoint(string path)
+        {
+            try
+            {
+                return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                return true;
+            }
+        }
+
+        void ScanRegistryKey(RegistryKey key, int depth)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var valueName in new[] { "JavaHome", "JavaPath", "InstallPath", "InstallationPath", "Path" })
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (key.GetValue(valueName) is string value) AddJavaHome(value);
+            }
+
+            if (depth <= 0) return;
+            try
+            {
+                foreach (var subKeyName in key.GetSubKeyNames())
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    using var child = key.OpenSubKey(subKeyName);
+                    if (child is not null) ScanRegistryKey(child, depth - 1);
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+        }
     }
 
     private static async Task<JavaInstallation?> ReadJavaInstallationAsync(string executablePath, CancellationToken cancellationToken)
@@ -287,6 +518,10 @@ public sealed class MojangJavaRuntimeManager : IJavaRuntimeCatalog
             return null;
         }
         catch (System.ComponentModel.Win32Exception)
+        {
+            return null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or System.Security.SecurityException)
         {
             return null;
         }

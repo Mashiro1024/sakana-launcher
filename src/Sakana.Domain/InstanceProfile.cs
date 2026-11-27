@@ -35,4 +35,6 @@ public sealed record InstanceProfile(
     string? ModrinthPackVersionNumber = null,
     string? GroupName = null,
     string TagsJson = "[]",
-    string? IconFileName = null);
+    string? IconFileName = null,
+    string? MinecraftAccountUuid = null,
+    string? CurseForgePackPath = null);

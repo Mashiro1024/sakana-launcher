@@ -11,7 +11,8 @@ public sealed class ModrinthModCatalog(
     HttpClient httpClient,
     string dataDirectory,
     ILocalModService localModService,
-    ILocalPackService localPackService) : IModrinthModCatalog
+    ILocalPackService localPackService,
+    DownloadConcurrencyOptions? downloadConcurrencyOptions = null) : IModrinthModCatalog
 {
     private const string ApiRoot = "https://api.modrinth.com/v2";
     private const long MaximumDependencySetBytes = 2L * 1024 * 1024 * 1024;
@@ -29,7 +30,7 @@ public sealed class ModrinthModCatalog(
     {
         PropertyNameCaseInsensitive = true
     };
-    private readonly ParallelArtifactDownloader _downloader = new(httpClient, maxConcurrency: 4);
+    private readonly ParallelArtifactDownloader _downloader = new(httpClient, downloadConcurrencyOptions);
 
     public async Task<ModrinthProjectSearchPage> SearchModsAsync(
         InstanceProfile profile,
@@ -172,7 +173,9 @@ public sealed class ModrinthModCatalog(
         string query,
         string sortOrder,
         int offset,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? gameVersion = null,
+        string? loader = null)
     {
         var normalizedQuery = (query ?? string.Empty).Trim();
         if (normalizedQuery.Length > 100)
@@ -180,7 +183,31 @@ public sealed class ModrinthModCatalog(
             throw new ArgumentException("Search text must be 100 characters or fewer.", nameof(query));
         }
 
-        var facetsJson = Uri.EscapeDataString(JsonSerializer.Serialize(new[] { new[] { "project_type:modpack" } }));
+        var normalizedGameVersion = gameVersion?.Trim();
+        if (!string.IsNullOrEmpty(normalizedGameVersion) &&
+            (normalizedGameVersion.Length > 32 || normalizedGameVersion.Any(character =>
+                !char.IsAsciiLetterOrDigit(character) && character is not '.' and not '_' and not '-')))
+        {
+            throw new ArgumentException("Enter a valid Minecraft version, for example 1.20.1.", nameof(gameVersion));
+        }
+
+        var normalizedLoader = loader?.Trim().ToLowerInvariant();
+        if (!string.IsNullOrEmpty(normalizedLoader) && normalizedLoader is not ("fabric" or "quilt" or "forge" or "neoforge"))
+        {
+            throw new ArgumentException("Choose a supported Minecraft loader filter.", nameof(loader));
+        }
+
+        var facets = new List<string[]> { new[] { "project_type:modpack" } };
+        if (!string.IsNullOrEmpty(normalizedGameVersion))
+        {
+            facets.Add([$"versions:{normalizedGameVersion}"]);
+        }
+        if (!string.IsNullOrEmpty(normalizedLoader))
+        {
+            facets.Add([$"categories:{normalizedLoader}"]);
+        }
+
+        var facetsJson = Uri.EscapeDataString(JsonSerializer.Serialize(facets));
         var queryPart = $"query={Uri.EscapeDataString(normalizedQuery)}&";
         var uri = BuildSearchUri(queryPart, facetsJson, sortOrder, offset);
         using var response = await httpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);

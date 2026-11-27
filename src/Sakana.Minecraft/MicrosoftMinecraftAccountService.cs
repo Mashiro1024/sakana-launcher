@@ -22,6 +22,7 @@ public sealed class MicrosoftMinecraftAccountService(
     private static readonly Uri MinecraftLoginEndpoint = new("https://api.minecraftservices.com/authentication/login_with_xbox");
     private static readonly Uri MinecraftEntitlementsEndpoint = new("https://api.minecraftservices.com/entitlements/mcstore");
     private static readonly Uri MinecraftProfileEndpoint = new("https://api.minecraftservices.com/minecraft/profile");
+    private static readonly Uri MojangSessionProfileEndpoint = new("https://sessionserver.mojang.com/session/minecraft/profile/");
     private static readonly JsonSerializerOptions ApiJsonOptions = new()
     {
         PropertyNamingPolicy = null,
@@ -32,6 +33,7 @@ public sealed class MicrosoftMinecraftAccountService(
     private MinecraftAccountSession? _currentSession;
     private DateTimeOffset _sessionExpiresAtUtc;
     private string? _currentClientId;
+    private string? _currentPlayerUuid;
 
     public async Task<MicrosoftDeviceCodePrompt> BeginSignInAsync(
         string clientId,
@@ -77,13 +79,17 @@ public sealed class MicrosoftMinecraftAccountService(
             throw new InvalidDataException("Microsoft did not issue a refresh token for Sakana. Check the application's offline_access configuration.");
         }
 
-        await SaveRefreshCredentialAsync(normalizedClientId, oauth.RefreshToken, cancellationToken);
         var account = await CreateMinecraftSessionAsync(normalizedClientId, oauth.AccessToken, oauth.ExpiresIn, cancellationToken);
         await _sessionLock.WaitAsync(cancellationToken);
         try
         {
+            var credentialStoreState = await ReadCredentialStoreAsync(cancellationToken);
+            UpsertCredential(credentialStoreState, normalizedClientId, oauth.RefreshToken, account.Session);
+            credentialStoreState.ActivePlayerUuid = account.Session.PlayerUuid;
+            await SaveCredentialStoreAsync(credentialStoreState, cancellationToken);
             _currentClientId = normalizedClientId;
             _currentSession = account.Session;
+            _currentPlayerUuid = account.Session.PlayerUuid;
             _sessionExpiresAtUtc = DateTimeOffset.UtcNow.AddSeconds(account.ExpiresInSeconds);
         }
         finally
@@ -94,27 +100,146 @@ public sealed class MicrosoftMinecraftAccountService(
         return account.Session;
     }
 
-    public async Task<MinecraftAccountSession?> GetCurrentSessionAsync(
+    public async Task<IReadOnlyList<MinecraftAccountInfo>> GetAccountsAsync(
         string clientId,
         CancellationToken cancellationToken = default)
     {
-        var normalizedClientId = ValidateClientId(clientId);
+        _ = ValidateClientId(clientId);
         await _sessionLock.WaitAsync(cancellationToken);
         try
         {
+            var state = await ReadCredentialStoreAsync(cancellationToken);
+            var activeCredential = FindActiveCredential(state);
+            return state.Accounts
+                .Select(account => new MinecraftAccountInfo(
+                    string.IsNullOrWhiteSpace(account.PlayerName) ? "待验证的账户" : account.PlayerName,
+                    account.PlayerUuid ?? string.Empty,
+                    ReferenceEquals(account, activeCredential),
+                    string.IsNullOrWhiteSpace(account.PlayerUuid) || string.IsNullOrWhiteSpace(account.PlayerName)))
+                .ToArray();
+        }
+        finally
+        {
+            _sessionLock.Release();
+        }
+    }
+
+    public async Task SetActiveAccountAsync(string playerUuid, CancellationToken cancellationToken = default)
+    {
+        var normalizedUuid = playerUuid?.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedUuid))
+        {
+            throw new ArgumentException("Choose a verified Minecraft account.", nameof(playerUuid));
+        }
+
+        await _sessionLock.WaitAsync(cancellationToken);
+        try
+        {
+            var state = await ReadCredentialStoreAsync(cancellationToken);
+            if (!state.Accounts.Any(account => string.Equals(account.PlayerUuid, normalizedUuid, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new KeyNotFoundException("The selected Minecraft account is no longer saved.");
+            }
+
+            state.ActivePlayerUuid = normalizedUuid;
+            await SaveCredentialStoreAsync(state, cancellationToken);
+            _currentSession = null;
+            _currentClientId = null;
+            _currentPlayerUuid = null;
+            _sessionExpiresAtUtc = DateTimeOffset.MinValue;
+        }
+        finally
+        {
+            _sessionLock.Release();
+        }
+    }
+
+    public async Task RemoveAccountAsync(string playerUuid, CancellationToken cancellationToken = default)
+    {
+        var normalizedUuid = playerUuid?.Trim() ?? string.Empty;
+        await _sessionLock.WaitAsync(cancellationToken);
+        try
+        {
+            var state = await ReadCredentialStoreAsync(cancellationToken);
+            var removed = normalizedUuid.Length == 0
+                ? state.Accounts.RemoveAll(account => string.IsNullOrWhiteSpace(account.PlayerUuid)) > 0
+                : state.Accounts.RemoveAll(account => string.Equals(account.PlayerUuid, normalizedUuid, StringComparison.OrdinalIgnoreCase)) > 0;
+            if (!removed)
+            {
+                throw new KeyNotFoundException("The selected Microsoft account is no longer saved.");
+            }
+
+            if (state.Accounts.Count == 0)
+            {
+                await credentialStore.ClearAsync(cancellationToken);
+                state.ActivePlayerUuid = null;
+            }
+            else if (normalizedUuid.Length == 0 || string.Equals(state.ActivePlayerUuid, normalizedUuid, StringComparison.OrdinalIgnoreCase))
+            {
+                state.ActivePlayerUuid = state.Accounts[0].PlayerUuid;
+                await SaveCredentialStoreAsync(state, cancellationToken);
+            }
+            else
+            {
+                await SaveCredentialStoreAsync(state, cancellationToken);
+            }
+
+            if (normalizedUuid.Length == 0 || string.Equals(_currentPlayerUuid, normalizedUuid, StringComparison.OrdinalIgnoreCase))
+            {
+                _currentSession = null;
+                _currentClientId = null;
+                _currentPlayerUuid = null;
+                _sessionExpiresAtUtc = DateTimeOffset.MinValue;
+            }
+        }
+        finally
+        {
+            _sessionLock.Release();
+        }
+    }
+
+    public Task<MinecraftAccountSession?> GetCurrentSessionAsync(
+        string clientId,
+        CancellationToken cancellationToken = default) =>
+        GetSessionForAccountAsync(clientId, playerUuid: null, cancellationToken: cancellationToken);
+
+    public async Task<MinecraftAccountSession?> GetSessionForAccountAsync(
+        string clientId,
+        string? playerUuid,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedClientId = ValidateClientId(clientId);
+        var normalizedPlayerUuid = string.IsNullOrWhiteSpace(playerUuid) ? null : playerUuid.Trim();
+        await _sessionLock.WaitAsync(cancellationToken);
+        try
+        {
+            var state = await ReadCredentialStoreAsync(cancellationToken);
+            var savedCredential = normalizedPlayerUuid is null
+                ? FindActiveCredential(state)
+                : state.Accounts.FirstOrDefault(account => string.Equals(
+                    account.PlayerUuid,
+                    normalizedPlayerUuid,
+                    StringComparison.OrdinalIgnoreCase));
+            if (savedCredential is null)
+            {
+                if (normalizedPlayerUuid is not null)
+                {
+                    throw new KeyNotFoundException("The Microsoft account selected for this instance is no longer saved. Choose another account in the instance launch settings.");
+                }
+
+                _currentSession = null;
+                _currentClientId = null;
+                _currentPlayerUuid = null;
+                _sessionExpiresAtUtc = DateTimeOffset.MinValue;
+                return null;
+            }
+
             if (_currentSession is not null &&
+                string.Equals(_currentPlayerUuid, savedCredential.PlayerUuid, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(_currentClientId, normalizedClientId, StringComparison.OrdinalIgnoreCase) &&
                 _sessionExpiresAtUtc > DateTimeOffset.UtcNow.AddMinutes(2))
             {
                 return _currentSession;
-            }
-
-            var savedCredential = await ReadRefreshCredentialAsync(cancellationToken);
-            if (savedCredential is null)
-            {
-                _currentSession = null;
-                _currentClientId = null;
-                return null;
             }
 
             if (!string.Equals(savedCredential.ClientId, normalizedClientId, StringComparison.OrdinalIgnoreCase))
@@ -129,19 +254,43 @@ public sealed class MicrosoftMinecraftAccountService(
             }
             catch (MicrosoftOAuthException exception) when (exception.Error == "invalid_grant")
             {
-                await credentialStore.ClearAsync(cancellationToken);
+                var removedAccountWasActive = string.Equals(
+                    state.ActivePlayerUuid,
+                    savedCredential.PlayerUuid,
+                    StringComparison.OrdinalIgnoreCase);
+                state.Accounts.Remove(savedCredential);
+                if (state.Accounts.Count == 0)
+                {
+                    await credentialStore.ClearAsync(cancellationToken);
+                }
+                else if (removedAccountWasActive)
+                {
+                    state.ActivePlayerUuid = state.Accounts[0].PlayerUuid;
+                    await SaveCredentialStoreAsync(state, cancellationToken);
+                }
+                else
+                {
+                    await SaveCredentialStoreAsync(state, cancellationToken);
+                }
                 _currentSession = null;
                 _currentClientId = null;
+                _currentPlayerUuid = null;
                 return null;
             }
 
             var rotatedRefreshToken = string.IsNullOrWhiteSpace(oauth.RefreshToken)
                 ? savedCredential.RefreshToken
                 : oauth.RefreshToken;
-            await SaveRefreshCredentialAsync(normalizedClientId, rotatedRefreshToken, cancellationToken);
             var account = await CreateMinecraftSessionAsync(normalizedClientId, oauth.AccessToken, oauth.ExpiresIn, cancellationToken);
+            UpsertCredential(state, normalizedClientId, rotatedRefreshToken, account.Session);
+            if (normalizedPlayerUuid is null)
+            {
+                state.ActivePlayerUuid = account.Session.PlayerUuid;
+            }
+            await SaveCredentialStoreAsync(state, cancellationToken);
             _currentClientId = normalizedClientId;
             _currentSession = account.Session;
+            _currentPlayerUuid = account.Session.PlayerUuid;
             _sessionExpiresAtUtc = DateTimeOffset.UtcNow.AddSeconds(account.ExpiresInSeconds);
             return _currentSession;
         }
@@ -156,10 +305,28 @@ public sealed class MicrosoftMinecraftAccountService(
         await _sessionLock.WaitAsync(cancellationToken);
         try
         {
+            var state = await ReadCredentialStoreAsync(cancellationToken);
+            var activeCredential = FindActiveCredential(state);
+            if (activeCredential is not null)
+            {
+                state.Accounts.Remove(activeCredential);
+            }
+
+            if (state.Accounts.Count == 0)
+            {
+                await credentialStore.ClearAsync(cancellationToken);
+                state.ActivePlayerUuid = null;
+            }
+            else
+            {
+                state.ActivePlayerUuid = state.Accounts[0].PlayerUuid;
+                await SaveCredentialStoreAsync(state, cancellationToken);
+            }
+
             _currentSession = null;
             _currentClientId = null;
+            _currentPlayerUuid = null;
             _sessionExpiresAtUtc = DateTimeOffset.MinValue;
-            await credentialStore.ClearAsync(cancellationToken);
         }
         finally
         {
@@ -304,6 +471,17 @@ public sealed class MicrosoftMinecraftAccountService(
             throw new InvalidDataException("Minecraft Services returned an incomplete player profile.");
         }
 
+        var activeSkin = profile.Skins?.FirstOrDefault(skin =>
+            string.Equals(skin.State, "ACTIVE", StringComparison.OrdinalIgnoreCase));
+        var skinTextureUrl = TryGetOfficialSkinTextureUrl(activeSkin?.Url);
+        var skinVariant = activeSkin?.Variant;
+        if (skinTextureUrl is null)
+        {
+            var sessionSkin = await TryGetSkinFromSessionProfileAsync(profile.Id, cancellationToken);
+            skinTextureUrl = sessionSkin.TextureUrl;
+            skinVariant ??= sessionSkin.Variant;
+        }
+
         var session = new MinecraftAccountSession(
             profile.Name,
             profile.Id,
@@ -311,8 +489,92 @@ public sealed class MicrosoftMinecraftAccountService(
             clientId,
             "msa",
             claims.XboxId,
-            userPropertiesJson: "{}");
+            userPropertiesJson: "{}",
+            skinTextureUrl: skinTextureUrl,
+            skinVariant: skinVariant);
         return (session, Math.Min(minecraftToken.ExpiresIn, microsoftExpiresInSeconds));
+    }
+
+    private async Task<(string? TextureUrl, string? Variant)> TryGetSkinFromSessionProfileAsync(
+        string playerUuid,
+        CancellationToken cancellationToken)
+    {
+        var normalizedUuid = playerUuid.Replace("-", string.Empty, StringComparison.Ordinal);
+        if (normalizedUuid.Length != 32 || !normalizedUuid.All(Uri.IsHexDigit))
+        {
+            return (null, null);
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        try
+        {
+            using var response = await httpClient.GetAsync(
+                new Uri(MojangSessionProfileEndpoint, normalizedUuid),
+                timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                return (null, null);
+            }
+
+            var profileJson = await response.Content.ReadAsStringAsync(timeout.Token);
+            var sessionProfile = JsonSerializer.Deserialize<MojangSessionProfileResponse>(profileJson, ApiJsonOptions);
+            var encodedTextures = sessionProfile?.Properties?.FirstOrDefault(property =>
+                string.Equals(property.Name, "textures", StringComparison.OrdinalIgnoreCase))?.Value;
+            if (string.IsNullOrWhiteSpace(encodedTextures))
+            {
+                return (null, null);
+            }
+
+            var textureJson = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(encodedTextures));
+            var texturePayload = JsonSerializer.Deserialize<MojangTexturePayload>(textureJson, ApiJsonOptions);
+            var skin = texturePayload?.Textures?.Skin;
+            var textureUrl = TryGetOfficialSkinTextureUrl(skin?.Url);
+            if (textureUrl is null)
+            {
+                return (null, null);
+            }
+
+            var variant = string.Equals(skin?.Metadata?.Model, "slim", StringComparison.OrdinalIgnoreCase)
+                ? "SLIM"
+                : "CLASSIC";
+            return (textureUrl, variant);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return (null, null);
+        }
+        catch (HttpRequestException)
+        {
+            return (null, null);
+        }
+        catch (JsonException)
+        {
+            return (null, null);
+        }
+        catch (FormatException)
+        {
+            return (null, null);
+        }
+    }
+
+    private static string? TryGetOfficialSkinTextureUrl(string? rawUrl)
+    {
+        if (!Uri.TryCreate(rawUrl, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp) ||
+            !uri.IsDefaultPort ||
+            !string.Equals(uri.Host, "textures.minecraft.net", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        // Minecraft profile APIs commonly return the texture host over HTTP.
+        // Keep the host allowlist and upgrade it before exposing the URL to the UI.
+        return new UriBuilder(uri)
+        {
+            Scheme = Uri.UriSchemeHttps,
+            Port = -1
+        }.Uri.AbsoluteUri;
     }
 
     private async Task<T> PostJsonAsync<T>(Uri endpoint, object body, string operation, CancellationToken cancellationToken)
@@ -352,15 +614,61 @@ public sealed class MicrosoftMinecraftAccountService(
         return TryDeserialize<OAuthErrorResponse>(content) ?? new OAuthErrorResponse("oauth_error", null);
     }
 
-    private async Task SaveRefreshCredentialAsync(string clientId, string refreshToken, CancellationToken cancellationToken)
-    {
-        await credentialStore.WriteAsync(JsonSerializer.Serialize(new SavedMicrosoftCredential(clientId, refreshToken)), cancellationToken);
-    }
-
-    private async Task<SavedMicrosoftCredential?> ReadRefreshCredentialAsync(CancellationToken cancellationToken)
+    private async Task<SavedMicrosoftCredentialStore> ReadCredentialStoreAsync(CancellationToken cancellationToken)
     {
         var value = await credentialStore.ReadAsync(cancellationToken);
-        return string.IsNullOrWhiteSpace(value) ? null : TryDeserialize<SavedMicrosoftCredential>(value);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return new SavedMicrosoftCredentialStore();
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(value);
+            if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("accounts", out _))
+            {
+                return JsonSerializer.Deserialize<SavedMicrosoftCredentialStore>(value, ApiJsonOptions)
+                    ?? throw new InvalidDataException("Saved Microsoft account data is empty.");
+            }
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException("Saved Microsoft account data could not be read.", exception);
+        }
+
+        var legacyCredential = TryDeserialize<SavedMicrosoftCredential>(value)
+            ?? throw new InvalidDataException("Saved Microsoft account data has an unsupported format.");
+        var migrated = new SavedMicrosoftCredentialStore();
+        migrated.Accounts.Add(legacyCredential);
+        migrated.ActivePlayerUuid = legacyCredential.PlayerUuid;
+        return migrated;
+    }
+
+    private Task SaveCredentialStoreAsync(SavedMicrosoftCredentialStore state, CancellationToken cancellationToken) =>
+        credentialStore.WriteAsync(JsonSerializer.Serialize(state, ApiJsonOptions), cancellationToken);
+
+    private static SavedMicrosoftCredential? FindActiveCredential(SavedMicrosoftCredentialStore state)
+    {
+        if (state.Accounts.Count == 0)
+        {
+            return null;
+        }
+
+        return state.Accounts.FirstOrDefault(account =>
+                   !string.IsNullOrWhiteSpace(state.ActivePlayerUuid) &&
+                   string.Equals(account.PlayerUuid, state.ActivePlayerUuid, StringComparison.OrdinalIgnoreCase))
+               ?? state.Accounts[0];
+    }
+
+    private static void UpsertCredential(
+        SavedMicrosoftCredentialStore state,
+        string clientId,
+        string refreshToken,
+        MinecraftAccountSession session)
+    {
+        state.Accounts.RemoveAll(account => string.Equals(account.PlayerUuid, session.PlayerUuid, StringComparison.OrdinalIgnoreCase));
+        state.Accounts.Add(new SavedMicrosoftCredential(clientId, refreshToken, session.PlayerUuid, session.PlayerName));
     }
 
     private static T? TryDeserialize<T>(string content)
@@ -385,9 +693,20 @@ public sealed class MicrosoftMinecraftAccountService(
         return parsed.ToString("D");
     }
 
+    private sealed class SavedMicrosoftCredentialStore
+    {
+        [JsonPropertyName("accounts")]
+        public List<SavedMicrosoftCredential> Accounts { get; set; } = [];
+
+        [JsonPropertyName("activePlayerUuid")]
+        public string? ActivePlayerUuid { get; set; }
+    }
+
     private sealed record SavedMicrosoftCredential(
         [property: JsonPropertyName("clientId")] string ClientId,
-        [property: JsonPropertyName("refreshToken")] string RefreshToken)
+        [property: JsonPropertyName("refreshToken")] string RefreshToken,
+        [property: JsonPropertyName("playerUuid")] string? PlayerUuid = null,
+        [property: JsonPropertyName("playerName")] string? PlayerName = null)
     {
         public override string ToString() => "SavedMicrosoftCredential(RefreshToken=[redacted])";
     }
@@ -441,7 +760,33 @@ public sealed class MicrosoftMinecraftAccountService(
 
     private sealed record MinecraftProfileResponse(
         [property: JsonPropertyName("id")] string? Id,
-        [property: JsonPropertyName("name")] string? Name);
+        [property: JsonPropertyName("name")] string? Name,
+        [property: JsonPropertyName("skins")] IReadOnlyList<MinecraftProfileSkin>? Skins);
+
+    private sealed record MinecraftProfileSkin(
+        [property: JsonPropertyName("state")] string? State,
+        [property: JsonPropertyName("url")] string? Url,
+        [property: JsonPropertyName("variant")] string? Variant);
+
+    private sealed record MojangSessionProfileResponse(
+        [property: JsonPropertyName("properties")] IReadOnlyList<MojangProfileProperty>? Properties);
+
+    private sealed record MojangProfileProperty(
+        [property: JsonPropertyName("name")] string? Name,
+        [property: JsonPropertyName("value")] string? Value);
+
+    private sealed record MojangTexturePayload(
+        [property: JsonPropertyName("textures")] MojangTextureCollection? Textures);
+
+    private sealed record MojangTextureCollection(
+        [property: JsonPropertyName("SKIN")] MojangSkinTexture? Skin);
+
+    private sealed record MojangSkinTexture(
+        [property: JsonPropertyName("url")] string? Url,
+        [property: JsonPropertyName("metadata")] MojangSkinMetadata? Metadata);
+
+    private sealed record MojangSkinMetadata(
+        [property: JsonPropertyName("model")] string? Model);
 
     private sealed record ApiErrorResponse(
         [property: JsonPropertyName("errorMessage")] string? ErrorMessage,

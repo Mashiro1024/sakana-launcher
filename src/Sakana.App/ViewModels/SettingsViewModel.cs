@@ -11,13 +11,17 @@ public sealed class SettingsViewModel(ILauncherService launcherService) : ViewMo
 
     public GlobalLaunchSettings GlobalLaunchSettings { get; private set; } = GlobalLaunchSettings.Default;
 
+    public int MaxConcurrentDownloads { get; private set; } = LauncherSettings.Default.MaxConcurrentDownloads;
+
     public async Task LoadAsync(CancellationToken cancellationToken = default)
     {
         var settings = await launcherService.GetSettingsAsync(cancellationToken);
         Theme = settings.Theme;
         GlobalLaunchSettings = settings.GlobalLaunchSettings;
+        MaxConcurrentDownloads = settings.MaxConcurrentDownloads;
         OnPropertyChanged(nameof(Theme));
         OnPropertyChanged(nameof(GlobalLaunchSettings));
+        OnPropertyChanged(nameof(MaxConcurrentDownloads));
     }
 
     public async Task SaveThemeAsync(ThemePreference theme, CancellationToken cancellationToken = default)
@@ -34,6 +38,19 @@ public sealed class SettingsViewModel(ILauncherService launcherService) : ViewMo
         OnPropertyChanged(nameof(GlobalLaunchSettings));
     }
 
+    public async Task SaveMaxConcurrentDownloadsAsync(int maxConcurrentDownloads, CancellationToken cancellationToken = default)
+    {
+        await launcherService.SaveMaxConcurrentDownloadsAsync(maxConcurrentDownloads, cancellationToken);
+        MaxConcurrentDownloads = maxConcurrentDownloads;
+        OnPropertyChanged(nameof(MaxConcurrentDownloads));
+    }
+
     public Task<IReadOnlyList<JavaInstallation>> DetectJavaInstallationsAsync(CancellationToken cancellationToken = default) =>
         launcherService.DetectJavaInstallationsAsync(cancellationToken);
+
+    public Task<JavaInstallation> InstallJavaRuntimeAsync(
+        int majorVersion,
+        IProgress<InstallationProgress>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        launcherService.InstallJavaRuntimeAsync(majorVersion, progress, cancellationToken);
 }

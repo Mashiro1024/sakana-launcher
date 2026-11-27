@@ -291,14 +291,7 @@ public sealed class LocalMinecraftWorldService(string dataDirectory) : ILocalMin
             throw new ArgumentException("The world name contains characters that cannot be used for a folder name.", nameof(name));
         }
 
-        var deviceName = normalized.Split('.')[0].TrimEnd(' ');
-        if (deviceName.Equals("CON", StringComparison.OrdinalIgnoreCase) ||
-            deviceName.Equals("PRN", StringComparison.OrdinalIgnoreCase) ||
-            deviceName.Equals("AUX", StringComparison.OrdinalIgnoreCase) ||
-            deviceName.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
-            deviceName.Length == 4 &&
-            (deviceName.StartsWith("COM", StringComparison.OrdinalIgnoreCase) || deviceName.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
-            deviceName[3] is >= '1' and <= '9')
+        if (IsReservedWindowsDeviceName(normalized))
         {
             throw new ArgumentException("This name is reserved by Windows. Choose another world name.", nameof(name));
         }
@@ -328,6 +321,7 @@ public sealed class LocalMinecraftWorldService(string dataDirectory) : ILocalMin
         foreach (var segment in segments)
         {
             if (segment.Length == 0 || segment is "." or ".." || segment.EndsWith(' ') || segment.EndsWith('.') ||
+                IsReservedWindowsDeviceName(segment) ||
                 segment.Any(char.IsControl) || Path.GetInvalidFileNameChars().Any(segment.Contains))
             {
                 throw new InvalidDataException("A world backup contains an unsafe path segment.");
@@ -336,6 +330,24 @@ public sealed class LocalMinecraftWorldService(string dataDirectory) : ILocalMin
 
         return string.Join('/', segments);
     }
+
+    private static bool IsReservedWindowsDeviceName(string name)
+    {
+        var deviceName = name.Split('.', 2)[0].TrimEnd(' ');
+        return deviceName.Equals("CON", StringComparison.OrdinalIgnoreCase) ||
+               deviceName.Equals("PRN", StringComparison.OrdinalIgnoreCase) ||
+               deviceName.Equals("AUX", StringComparison.OrdinalIgnoreCase) ||
+               deviceName.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
+               deviceName.Equals("CONIN$", StringComparison.OrdinalIgnoreCase) ||
+               deviceName.Equals("CONOUT$", StringComparison.OrdinalIgnoreCase) ||
+               IsNumberedDeviceName(deviceName, "COM") ||
+               IsNumberedDeviceName(deviceName, "LPT");
+    }
+
+    private static bool IsNumberedDeviceName(string value, string prefix) =>
+        value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+        value.Length == prefix.Length + 1 &&
+        value[^1] is >= '1' and <= '9';
 
     private static string GetWorldArchivePrefix(IReadOnlyList<NormalizedEntry> entries)
     {
